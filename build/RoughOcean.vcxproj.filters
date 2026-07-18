@@ -1,0 +1,55 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\App.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Audio.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\GpuContext.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Ocean.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Sky.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Buoy.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Post.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\third_party\imgui\imgui.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\third_party\imgui\imgui_draw.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\third_party\imgui\imgui_tables.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\third_party\imgui\imgui_widgets.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\third_party\imgui\backends\imgui_impl_win32.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\third_party\imgui\backends\imgui_impl_dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{9A27F3E5-2E99-3665-B663-7BC3A8F6D207}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
