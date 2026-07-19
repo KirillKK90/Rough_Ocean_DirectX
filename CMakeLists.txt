@@ -11,6 +11,7 @@ add_executable(RoughOcean WIN32
     src/App.cpp
     src/Audio.cpp
     src/GpuContext.cpp
+    src/Meteor.cpp
     src/Ocean.cpp
     src/Sky.cpp
     src/Buoy.cpp

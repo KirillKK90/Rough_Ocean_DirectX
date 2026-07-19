@@ -11,6 +11,8 @@ navigation buoy that bobs on the waves.
 | Evening, sea state 4 | Morning, sea state 7 |
 | ![Night](screenshots/night_moon.png) | ![Late evening](screenshots/late_evening_ui.png) |
 | Night (moonlight), sea state 6 | Late evening + control panel |
+| ![Meteorite](screenshots/meteor_streak.png) | ![Impact rings](screenshots/meteor_rings.png) |
+| Meteorite falling toward the water | Impact rings spreading past the buoy |
 
 ## Features and techniques
 
@@ -34,6 +36,15 @@ navigation buoy that bobs on the waves.
 - **Buoy**: procedural mesh; buoyancy physics (heave spring + tilt inertia + anchored
   sway) driven by GPU→CPU readback of the displacement maps; alternating red/green
   flashing lamp with an HDR glow billboard and a point light on the surrounding water
+- **Meteorite strike** (button in the UI or `M` key): a flaming rock falls at ~45°
+  with a fire/smoke particle trail, splashes, and radiates circular waves computed
+  from the classical **Cauchy–Poisson solution** for an impulsive disturbance on
+  deep water — genuinely dispersive rings (long waves lead, short ripples trail,
+  local wavenumber k = g·t²/4r²), cylindrical-spreading amplitude decay plus
+  temporal damping, whitecapped crests near the impact, and linear superposition
+  with the FFT wind sea. The rings rock the buoy when they reach it, and the sea
+  returns to its undisturbed state within a couple of minutes. Up to 4 impact
+  wave systems can be live at once
 - **Post-processing**: HDR (RGBA16F) → threshold bloom pyramid → ACES tonemap →
   FXAA; reversed-Z depth for horizon-scale precision
 - **Sound** (XAudio2, no music), two selectable modes:
@@ -84,6 +95,7 @@ Studio and build/run from there.
 - **Right mouse drag** — look around
 - **W A S D / Q E** — move (Shift = fast, mouse wheel = speed)
 - **1..7** — time of day presets
+- **M** — launch a meteorite (same as the UI button)
 - **Esc** — quit
 
 The on-screen panel exposes: **Level of detail** (Low / Medium / High / Ultra),
@@ -117,6 +129,8 @@ All levels are far above the 25–30 FPS target on an integrated Intel Iris Xe
 --screenshot PATH  save a PNG at the end of a benchmark run
 --ui               keep the UI visible in benchmark screenshots
 --campos X Y Z     override the camera position (with --yaw / --pitch, degrees)
+--meteor T         auto-launch a meteorite at sim time T seconds
+--fixeddt S        fixed timestep in seconds (deterministic runs)
 --novsync          disable vsync
 --selftest         run the GPU FFT correctness test and exit
 --audiotest        print synthesized ocean-sound levels and exit

@@ -5,6 +5,8 @@
 #include "GpuContext.h"
 #include "Ocean.h"
 
+class Meteor;
+
 // Navigation buoy: procedural mesh, buoyancy physics driven by CPU water
 // samples, and an alternating red/green flashing lamp.
 class Buoy
@@ -12,8 +14,10 @@ class Buoy
 public:
     void Create(GpuContext& ctx);
 
-    // Advance physics; ocean provides water height/normal at the anchor.
-    void Update(GpuContext& ctx, Ocean& ocean, float dt, float simTime, float lambda);
+    // Advance physics; ocean provides water height/normal at the anchor, and
+    // meteor (optional) adds impact ring waves.
+    void Update(GpuContext& ctx, Ocean& ocean, const Meteor* meteor,
+                float dt, float simTime, float lambda);
 
     void Draw(GpuContext& ctx, D3D12_GPU_VIRTUAL_ADDRESS frameCB, const DirectX::XMFLOAT3& camPos);
     void DrawGlow(GpuContext& ctx, D3D12_GPU_VIRTUAL_ADDRESS frameCB, const DirectX::XMFLOAT3& camPos);

@@ -25,6 +25,7 @@ cbuffer FrameCB : register(b0)
     float3 gBuoyLightPos;   float gBuoyLightOn;   // camera-relative position
     float3 gBuoyLightColor; float gFogDensity;
     float2 gWindDir;        float gDistRough;     float gPad0;
+    float4 gImpacts[4];     // xy = world XZ, z = seconds since impact (<0 off), w = amplitude
 }
 
 // Per-object constants.
@@ -87,6 +88,62 @@ float V_SmithApprox(float NdL, float NdV, float a)
 {
     // Karis' approximation of height-correlated Smith visibility.
     return 0.5 / max(lerp(2.0 * NdL * NdV, NdL + NdV, a), 1e-5);
+}
+
+// ---------------------------------------------------------------------------
+// Meteorite impact waves: Cauchy-Poisson dispersive rings on deep water.
+// An impulsive point disturbance radiates a ring packet in which, at radius r
+// and time t, the locally dominant wavenumber is k = g t^2 / (4 r^2) (the
+// stationary-phase solution of the deep-water dispersion relation), with
+// phase -g t^2 / (4 r). Long waves lead, short ripples trail, amplitude falls
+// with cylindrical spreading and decays in time — and it superimposes
+// linearly on the FFT sea. Keep in sync with Meteor::HeightAt (CPU).
+// ---------------------------------------------------------------------------
+static const float IMP_G = 9.81;
+static const float IMP_K0 = 0.11;      // dominant wavenumber (~57 m wavelength)
+static const float IMP_BAND = 1.65;    // 1/(2 sigma^2) of the log-space band
+static const float IMP_R0 = 45.0;      // spreading falloff radius
+static const float IMP_TAU = 45.0;     // temporal decay, seconds
+static const float IMP_SPLASH_W = 14.0;
+
+void ImpactWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foam)
+{
+    disp = 0;
+    slope = 0;
+    foam = 0;
+    [unroll]
+    for (int ii = 0; ii < 4; ++ii)
+    {
+        float t = gImpacts[ii].z;
+        float a0 = gImpacts[ii].w;
+        if (t <= 0.0 || a0 <= 0.0)
+            continue;
+        float2 d = worldXZ - gImpacts[ii].xy;
+        float r = max(length(d), 2.0);
+        float2 rhat = d / r;
+
+        float kloc = IMP_G * t * t / (4.0 * r * r);
+        float phase = -IMP_G * t * t / (4.0 * r);
+        float lx = log(kloc / IMP_K0);
+        float env = exp(-lx * lx * IMP_BAND);
+        float A = a0 * pow(IMP_R0 / (IMP_R0 + r), 0.75) * exp(-t / IMP_TAU) * env;
+
+        float s, c;
+        sincos(phase, s, c);
+
+        // Central splash: crater and rebound during the first seconds.
+        float sedge = exp(-r * r / (IMP_SPLASH_W * IMP_SPLASH_W));
+        float spulse = a0 * 1.8 * cos(2.2 * t) * exp(-t / 2.8);
+
+        disp.y += A * c - spulse * sedge;
+        disp.xz += rhat * (-A * s) * 1.4; // Gerstner-style crest sharpening
+
+        float detadr = -A * kloc * s;
+        float dsplashdr = spulse * sedge * (2.0 * r / (IMP_SPLASH_W * IMP_SPLASH_W));
+        slope += rhat * (detadr + dsplashdr);
+        // Whitecapped crests where the rings are steep, fading with radius.
+        foam += saturate((abs(detadr) - 0.05) * 6.0) * saturate(1.3 - r / 260.0);
+    }
 }
 
 // Fullscreen triangle.

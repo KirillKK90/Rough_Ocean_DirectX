@@ -67,6 +67,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         }
         else if (a == L"--yaw") { opts.hasCamera = true; opts.yawDeg = std::wcstof(next().c_str(), nullptr); }
         else if (a == L"--pitch") { opts.hasCamera = true; opts.pitchDeg = std::wcstof(next().c_str(), nullptr); }
+        else if (a == L"--fixeddt") opts.fixedDt = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--meteor") opts.meteorAt = std::wcstof(next().c_str(), nullptr);
         else if (a == L"--help" || a == L"-h" || a == L"/?")
         {
             LogF("RoughOcean options:\n"
@@ -79,6 +81,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
                  "  --ui               keep the UI visible in benchmark screenshots\n"
                  "  --campos X Y Z     camera position override\n"
                  "  --yaw D --pitch D  camera angles override (degrees)\n"
+                 "  --meteor T         auto-launch a meteorite at sim time T seconds\n"
+                 "  --fixeddt S        fixed timestep (deterministic runs)\n"
                  "  --novsync          disable vsync\n"
                  "  --selftest         run the GPU FFT correctness test and exit\n"
                  "  --audiotest        print synthesized ocean-sound levels and exit\n");

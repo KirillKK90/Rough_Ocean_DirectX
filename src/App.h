@@ -7,6 +7,7 @@
 #include "Buoy.h"
 #include "Camera.h"
 #include "GpuContext.h"
+#include "Meteor.h"
 #include "Ocean.h"
 #include "Post.h"
 #include "Sky.h"
@@ -21,7 +22,9 @@ struct LaunchOptions
     int benchFrames = 0;          // if > 0: render N frames, report FPS, exit
     std::string screenshotPath;   // optional PNG capture in bench mode
     bool selftest = false;
-    bool showUi = false; // keep the UI visible in bench mode
+    bool showUi = false;   // keep the UI visible in bench mode
+    float fixedDt = 0;     // deterministic timestep for verification runs
+    float meteorAt = -1;   // auto-launch a meteorite at this sim time
     // Optional camera override (verification shots).
     bool hasCamera = false;
     float camX = 0, camY = 12, camZ = 0;
@@ -54,6 +57,7 @@ private:
         DirectX::XMFLOAT3 buoyLightPos; float buoyLightOn;
         DirectX::XMFLOAT3 buoyLightColor; float fogDensity;
         DirectX::XMFLOAT2 windDir; float distRough; float pad0;
+        DirectX::XMFLOAT4 impacts[Meteor::kMaxImpacts];
     };
 
     void InitWindow(HINSTANCE hInst);
@@ -77,6 +81,7 @@ private:
     Buoy buoy;
     Post post;
     OceanAudio audio;
+    Meteor meteor;
 
     OceanParams oceanParams;
     Sky::Params skyParams;
@@ -97,7 +102,9 @@ private:
     bool uiFxaa = true;
     int uiSoundMode = int(SoundMode::Soothing);
     float uiVolume = 0.8f;
+    float uiMeteorPower = 4.0f;
     bool spectrumDirty = true;
+    bool meteorAutoLaunched = false;
 
     // Derived lighting.
     DirectX::XMFLOAT3 lightDir{ 0, 0.5f, 0.87f };

@@ -13,6 +13,9 @@
     <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\GpuContext.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Meteor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Ocean.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

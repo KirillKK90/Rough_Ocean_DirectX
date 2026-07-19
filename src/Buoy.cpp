@@ -5,6 +5,8 @@
 #include <cstring>
 #include <vector>
 
+#include "Meteor.h"
+
 using namespace DirectX;
 
 namespace
@@ -187,10 +189,25 @@ void Buoy::BuildMesh(GpuContext& ctx)
     ibv = { ib->GetGPUVirtualAddress(), static_cast<UINT>(ibSize), DXGI_FORMAT_R32_UINT };
 }
 
-void Buoy::Update(GpuContext& ctx, Ocean& ocean, float dt, float simTime, float lambda)
+void Buoy::Update(GpuContext& ctx, Ocean& ocean, const Meteor* meteor,
+                  float dt, float simTime, float lambda)
 {
     dt = std::min(dt, 0.05f);
     WaterSample ws = ocean.Sample(ctx, anchor.x, anchor.y, lambda);
+
+    // Meteorite impact rings: add their height and blend their slope into the
+    // sampled normal so the buoy rides them like any other wave.
+    if (meteor && meteor->AnyImpactActive())
+    {
+        ws.height += meteor->HeightAt(anchor.x, anchor.y);
+        const float e = 2.0f;
+        float sx = (meteor->HeightAt(anchor.x + e, anchor.y) - meteor->HeightAt(anchor.x - e, anchor.y)) / (2 * e);
+        float sz = (meteor->HeightAt(anchor.x, anchor.y + e) - meteor->HeightAt(anchor.x, anchor.y - e)) / (2 * e);
+        float nsx = -ws.normal.x / std::max(ws.normal.y, 0.2f) + sx;
+        float nsz = -ws.normal.z / std::max(ws.normal.y, 0.2f) + sz;
+        XMVECTOR n = XMVector3Normalize(XMVectorSet(-nsx, 1.0f, -nsz, 0));
+        XMStoreFloat3(&ws.normal, n);
+    }
 
     // Heave: buoyancy spring toward the water surface with drag.
     float depth = ws.height - heaveY;

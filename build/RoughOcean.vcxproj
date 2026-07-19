@@ -392,6 +392,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\App.cpp" />
     <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Audio.cpp" />
     <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\GpuContext.cpp" />
+    <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Meteor.cpp" />
     <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Ocean.cpp" />
     <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Sky.cpp" />
     <ClCompile Include="D:\VSProjects\AI_3D_SIM\Rough_Ocean_DirectX\src\Buoy.cpp" />

@@ -25,6 +25,7 @@ namespace DescSlot
     constexpr uint32_t OceanDraw = 0;      // 10 slots
     constexpr uint32_t SkyDraw = 16;       // 1 slot: sky cubemap
     constexpr uint32_t BuoyDraw = 20;      // 1 slot: sky cubemap
+    constexpr uint32_t MeteorParticles = 21; // 2 slots: per-frame particle buffer SRV
     constexpr uint32_t Tonemap = 24;       // 2 slots: scene HDR, bloom
     constexpr uint32_t Fxaa = 28;          // 1 slot: LDR
     constexpr uint32_t BloomPre = 32;      // 1 slot: scene HDR

@@ -153,8 +153,17 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
         lastTicks = now.QuadPart;
         dt = std::clamp(dt, 0.0001f, 0.1f);
 
+        if (opts.fixedDt > 0.0f)
+            dt = opts.fixedDt; // deterministic verification runs
+
         UpdateCameraInput(dt);
         simTime += dt * uiTimeScale;
+
+        if (opts.meteorAt >= 0.0f && simTime >= opts.meteorAt && !meteorAutoLaunched)
+        {
+            meteor.Launch(camera, uiMeteorPower);
+            meteorAutoLaunched = true;
+        }
 
         RenderFrame(dt);
 
@@ -245,6 +254,7 @@ void App::InitSystems()
 
     ApplyLod(uiLod, true);
     buoy.Create(ctx);
+    meteor.Create(ctx);
     post.Create(ctx, ctx.width, ctx.height);
     ApplySeaState();
     UpdateLighting();
@@ -379,6 +389,7 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     cb.fogDensity = 1.0e-4f;
     cb.windDir = oceanParams.windDir;
     cb.distRough = 0.16f;
+    meteor.FillImpacts(cb.impacts);
 
     void* p = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS va = ctx.AllocUpload(sizeof(FrameCB), &p);
@@ -405,7 +416,9 @@ void App::RenderFrame(float dt)
     ctx.Transition(backbuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
     // Physics reads the readback slot BeginFrame just fenced.
-    buoy.Update(ctx, ocean, dt * uiTimeScale, simTime, oceanParams.choppiness);
+    meteor.Update(dt * uiTimeScale);
+    meteor.UploadParticles(ctx);
+    buoy.Update(ctx, ocean, &meteor, dt * uiTimeScale, simTime, oceanParams.choppiness);
 
     sky.RecordGenerate(ctx, skyParams);
     ocean.RecordSimulation(ctx, simTime, dt * uiTimeScale, oceanParams, spectrumDirty);
@@ -428,9 +441,11 @@ void App::RenderFrame(float dt)
     cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr); // reversed-Z
 
     buoy.Draw(ctx, frameCB, camera.pos);
+    meteor.DrawRock(ctx, frameCB, camera.pos);
     ocean.Draw(ctx, frameCB);
     sky.Draw(ctx, frameCB);
     buoy.DrawGlow(ctx, frameCB, camera.pos);
+    meteor.DrawTrail(ctx, frameCB);
 
     post.Record(ctx, RtvSlot::Backbuffer0 + bbIdx, uiFxaa,
         exposureBase * uiExposureMul, uiBloom, 1.15f, 0.32f);
@@ -486,6 +501,19 @@ void App::BuildUi(float dt)
         ApplySeaState();
         spectrumDirty = true;
     }
+
+    // Meteorite strike.
+    {
+        bool disabled = meteor.Flying();
+        if (disabled)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Meteorite", ImVec2(-1, 0)))
+            meteor.Launch(camera, uiMeteorPower);
+        if (disabled)
+            ImGui::EndDisabled();
+        ImGui::SliderFloat("Impact power", &uiMeteorPower, 1.0f, 8.0f, "%.1f m");
+    }
+    ImGui::Separator();
 
     if (ImGui::CollapsingHeader("Waves", ImGuiTreeNodeFlags_DefaultOpen))
     {
@@ -546,7 +574,7 @@ void App::BuildUi(float dt)
 
     ImGui::Separator();
     ImGui::TextDisabled("RMB drag: look around  |  WASD/QE: move");
-    ImGui::TextDisabled("Shift: fast  |  Wheel: speed  |  Esc: quit");
+    ImGui::TextDisabled("Shift: fast  |  Wheel: speed  |  M: meteorite  |  Esc: quit");
     ImGui::End();
 }
 
@@ -599,6 +627,8 @@ LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE)
             PostQuitMessage(0);
+        if (wp == 'M' && (!io || !io->WantCaptureKeyboard))
+            meteor.Launch(camera, uiMeteorPower);
         if (wp >= '1' && wp <= '0' + kNumTimes && (!io || !io->WantCaptureKeyboard))
         {
             uiTimeOfDay = int(wp - '1');

@@ -50,6 +50,13 @@ VSOut VSOcean(VSIn v)
     disp += fades.z * tDisp2.SampleLevel(samLinearWrap, worldXZ * gCascade2.x, 0).xyz;
     disp.xz *= gLambda;
 
+    // Meteorite impact rings superimpose linearly on the wind sea.
+    float3 impDisp;
+    float2 impSlope;
+    float impFoam;
+    ImpactWaves(worldXZ, impDisp, impSlope, impFoam);
+    disp += impDisp;
+
     float3 rel = float3(v.off.x + disp.x, disp.y - gCamPos.y, v.off.y + disp.z);
     o.pos = mul(float4(rel, 1.0), gViewProj);
     o.rel = rel;
@@ -73,6 +80,14 @@ float4 PSOcean(VSOut i) : SV_Target
 
     float2 slope = float2(d.x / max(1.0 + gLambda * d.z, 0.15),
                           d.y / max(1.0 + gLambda * d.w, 0.15));
+
+    // Meteorite impact rings: analytic slopes give crisp per-pixel normals.
+    float3 impDisp;
+    float2 impSlope;
+    float impFoam;
+    ImpactWaves(i.worldXZ, impDisp, impSlope, impFoam);
+    slope += impSlope;
+
     float3 N = normalize(float3(-slope.x, 1.0, -slope.y));
     // keep normals from tipping past vertical toward the eye
     if (dot(N, V) < 0.0)
@@ -86,6 +101,7 @@ float4 PSOcean(VSOut i) : SV_Target
     float foamTexture = Fbm(i.worldXZ * 0.9 + float2(0.07, 0.05) * gTime, 3);
     float foam = saturate(foamAcc * gFoamAmount * (0.55 + 0.9 * foamTexture));
     foam = foam * foam * (3.0 - 2.0 * foam);
+    foam = saturate(foam + impFoam * (0.4 + 0.6 * foamTexture));
 
     // --- Roughness: base + fading detail cascades add variance + foam ---
     float detailLoss = (1.0 - i.fades.y) * gCascade1.z + (1.0 - i.fades.z) * gCascade2.z;
