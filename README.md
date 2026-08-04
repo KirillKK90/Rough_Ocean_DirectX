@@ -36,15 +36,17 @@ navigation buoy that bobs on the waves.
 - **Buoy**: procedural mesh; buoyancy physics (heave spring + tilt inertia + anchored
   sway) driven by GPU→CPU readback of the displacement maps; alternating red/green
   flashing lamp with an HDR glow billboard and a point light on the surrounding water
-- **Meteorite strike** (button in the UI or `M` key): a flaming rock falls at ~45°
-  with a fire/smoke particle trail, splashes, and radiates circular waves computed
-  from the classical **Cauchy–Poisson solution** for an impulsive disturbance on
-  deep water — genuinely dispersive rings (long waves lead, short ripples trail,
-  local wavenumber k = g·t²/4r²), cylindrical-spreading amplitude decay plus
-  temporal damping, whitecapped crests near the impact, and linear superposition
-  with the FFT wind sea. The rings rock the buoy when they reach it, and the sea
-  returns to its undisturbed state within a couple of minutes. Up to 4 impact
-  wave systems can be live at once
+- **Meteorite strike** (button in the UI or `M` key): a rock streaks in at
+  2.6 km/s on a ~45° trajectory — a half-second flash across the sky with a
+  lingering fire/smoke trail — then detonates on the water. The impact radiates
+  two wave systems: a **fast leading bore** (a foam-capped, tsunami-like
+  solitary crest with a trailing drawdown racing out at ~40 m/s, carrying the
+  bulk of the impact energy) and, behind it, the slower dispersive ring packet
+  of the classical **Cauchy–Poisson solution** (long waves lead, short ripples
+  trail, local wavenumber k = g·t²/4r²). Both decay by cylindrical spreading
+  plus temporal damping, superimpose linearly with the FFT wind sea, rock the
+  buoy as they pass, and the ocean returns to its undisturbed state within a
+  couple of minutes. Up to 4 impact wave systems can be live at once
 - **Post-processing**: HDR (RGBA16F) → threshold bloom pyramid → ACES tonemap →
   FXAA; reversed-Z depth for horizon-scale precision
 - **Sound** (XAudio2, no music), two selectable modes:

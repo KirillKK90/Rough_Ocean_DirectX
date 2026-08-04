@@ -14,7 +14,7 @@ class Meteor
 {
 public:
     static constexpr uint32_t kMaxImpacts = 4;
-    static constexpr uint32_t kMaxParticles = 256;
+    static constexpr uint32_t kMaxParticles = 768;
 
     void Create(GpuContext& ctx);
     void Launch(const Camera& camera, float power);

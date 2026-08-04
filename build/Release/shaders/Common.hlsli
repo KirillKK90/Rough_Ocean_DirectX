@@ -100,11 +100,12 @@ float V_SmithApprox(float NdL, float NdV, float a)
 // linearly on the FFT sea. Keep in sync with Meteor::HeightAt (CPU).
 // ---------------------------------------------------------------------------
 static const float IMP_G = 9.81;
-static const float IMP_K0 = 0.11;      // dominant wavenumber (~57 m wavelength)
+static const float IMP_K0 = 0.09;      // ring packet dominant wavenumber (~70 m)
 static const float IMP_BAND = 1.65;    // 1/(2 sigma^2) of the log-space band
 static const float IMP_R0 = 45.0;      // spreading falloff radius
 static const float IMP_TAU = 45.0;     // temporal decay, seconds
 static const float IMP_SPLASH_W = 14.0;
+static const float IMP_BORE_C = 40.0;  // leading bore speed, m/s (tsunami-like)
 
 void ImpactWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foam)
 {
@@ -143,6 +144,20 @@ void ImpactWaves(float2 worldXZ, out float3 disp, out float2 slope, out float fo
         slope += rhat * (detadr + dsplashdr);
         // Whitecapped crests where the rings are steep, fading with radius.
         foam += saturate((abs(detadr) - 0.05) * 6.0) * saturate(1.3 - r / 260.0);
+
+        // Leading bore: the impact dumps enormous energy into a fast,
+        // long-wavelength solitary crest (with a trailing drawdown) that
+        // races ahead of the dispersive ring packet at tsunami-like speed.
+        float rb = IMP_BORE_C * t;
+        float wb = 16.0 + 0.05 * rb; // front widens as it spreads
+        float xb = (r - rb) / wb;
+        float g1 = exp(-xb * xb);
+        float g2 = exp(-(xb + 1.6) * (xb + 1.6));
+        float Ab = a0 * 2.2 * (80.0 / (80.0 + rb)) * exp(-t / 70.0);
+        disp.y += Ab * (g1 - 0.4 * g2);
+        disp.xz += rhat * Ab * g1 * 0.7;
+        slope += rhat * (Ab * (-2.0 * xb * g1 + 0.8 * (xb + 1.6) * g2) / wb);
+        foam += g1 * saturate(Ab * 0.5) * 0.9; // churning white front while tall
     }
 }
 

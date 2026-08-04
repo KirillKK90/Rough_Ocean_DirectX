@@ -18,7 +18,8 @@ namespace
 
     // Must match the constants in Common.hlsli (ImpactWaves).
     constexpr float kG = 9.81f;
-    constexpr float kK0 = 0.11f;
+    constexpr float kK0 = 0.09f;
+    constexpr float kBoreC = 40.0f;
     constexpr float kBand = 1.65f;
     constexpr float kR0 = 45.0f;
     constexpr float kTau = 45.0f;
@@ -137,8 +138,8 @@ void Meteor::Launch(const Camera& camera, float impactPower)
     // Impact point ahead of the camera, with some scatter.
     float cy = std::cos(camera.yaw), sy = std::sin(camera.yaw);
     XMFLOAT2 fwd(sy, cy), perp(cy, -sy);
-    float dist = 190.0f + Rand01() * 90.0f;
-    float lateral = (Rand01() - 0.5f) * 80.0f;
+    float dist = 150.0f + Rand01() * 60.0f;
+    float lateral = (Rand01() - 0.5f) * 50.0f;
     XMFLOAT2 target(camera.pos.x + fwd.x * dist + perp.x * lateral,
                     camera.pos.z + fwd.y * dist + perp.y * lateral);
 
@@ -148,7 +149,8 @@ void Meteor::Launch(const Camera& camera, float impactPower)
     float cb = std::cos(beta), sb = std::sin(beta);
     XMFLOAT2 u(fwd.x * cb + perp.x * sb, fwd.y * cb + perp.y * sb);
     float elev = XMConvertToRadians(45.0f + (Rand01() - 0.5f) * 12.0f);
-    const float speed = 260.0f, range = 650.0f;
+    // Real meteorites hit at km/s — a half-second streak across the sky.
+    const float speed = 2600.0f, range = 1400.0f;
     XMFLOAT3 dir(u.x * std::cos(elev), -std::sin(elev), u.y * std::cos(elev));
     vel = XMFLOAT3(dir.x * speed, dir.y * speed, dir.z * speed);
     pos = XMFLOAT3(target.x - dir.x * range, -dir.y * range, target.y - dir.z * range);
@@ -168,18 +170,19 @@ Meteor::Particle* Meteor::AllocParticle()
 
 void Meteor::EmitTrail(float dt)
 {
-    // Emit spread along the segment flown this frame so the streak stays
-    // continuous even at large timesteps.
+    // Distance-based emission spread along the segment flown this frame, so
+    // the streak paints continuously regardless of timestep and speed.
     XMFLOAT3 prev(pos.x - vel.x * dt, pos.y - vel.y * dt, pos.z - vel.z * dt);
-    emitAccum += dt * 130.0f;
+    float metersFlown = std::sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z) * dt;
+    emitAccum += metersFlown * 0.40f; // particles per meter of path
     while (emitAccum >= 1.0f)
     {
         emitAccum -= 1.0f;
         Particle* p = AllocParticle();
         if (!p)
             return;
-        bool fire = Rand01() < 0.55f;
-        float jitter = fire ? 1.0f : 2.2f;
+        bool fire = Rand01() < 0.45f;
+        float jitter = fire ? 1.2f : 2.6f;
         float seg = Rand01();
         XMFLOAT3 base(prev.x + (pos.x - prev.x) * seg,
                       prev.y + (pos.y - prev.y) * seg,
@@ -188,31 +191,31 @@ void Meteor::EmitTrail(float dt)
         p->pos = XMFLOAT3(base.x + (Rand01() - 0.5f) * jitter,
                           base.y + (Rand01() - 0.5f) * jitter,
                           base.z + (Rand01() - 0.5f) * jitter);
-        p->vel = XMFLOAT3(vel.x * 0.04f + (Rand01() - 0.5f) * 4.0f,
-                          vel.y * 0.04f + (Rand01() - 0.5f) * 4.0f,
-                          vel.z * 0.04f + (Rand01() - 0.5f) * 4.0f);
+        p->vel = XMFLOAT3(vel.x * 0.003f + (Rand01() - 0.5f) * 5.0f,
+                          vel.y * 0.003f + (Rand01() - 0.5f) * 5.0f,
+                          vel.z * 0.003f + (Rand01() - 0.5f) * 5.0f);
         p->life = 0;
         if (fire)
         {
-            p->maxLife = 0.4f + Rand01() * 0.45f;
-            p->size = 2.4f + Rand01() * 1.2f;
-            p->growth = 2.2f;
+            p->maxLife = 0.45f + Rand01() * 0.5f;
+            p->size = 2.6f + Rand01() * 1.4f;
+            p->growth = 2.4f;
             p->gravity = 0.0f;
             p->drag = 1.5f;
             p->colStart = XMFLOAT3(1.8f, 0.95f, 0.45f);
             p->colEnd = XMFLOAT3(0.9f, 0.16f, 0.03f);
-            p->intensity = 2.2f;
+            p->intensity = 2.4f;
         }
-        else // smoke
+        else // smoke: the lingering streak line
         {
-            p->maxLife = 1.6f + Rand01() * 1.2f;
-            p->size = 3.5f + Rand01() * 1.5f;
-            p->growth = 3.5f;
+            p->maxLife = 1.9f + Rand01() * 1.4f;
+            p->size = 3.8f + Rand01() * 1.8f;
+            p->growth = 3.8f;
             p->gravity = -1.0f; // buoyant
             p->drag = 1.0f;
             p->colStart = XMFLOAT3(0.50f, 0.38f, 0.28f);
             p->colEnd = XMFLOAT3(0.10f, 0.09f, 0.09f);
-            p->intensity = 0.28f;
+            p->intensity = 0.30f;
         }
     }
 }
@@ -249,9 +252,9 @@ void Meteor::SpawnImpact()
         flash->gravity = 0;
         flash->drag = 0;
         flash->life = 0;
-        flash->maxLife = 0.8f;
-        flash->size = 18.0f;
-        flash->growth = 42.0f;
+        flash->maxLife = 0.9f;
+        flash->size = 22.0f;
+        flash->growth = 55.0f;
         flash->colStart = XMFLOAT3(2.2f, 1.5f, 0.9f);
         flash->colEnd = XMFLOAT3(0.7f, 0.25f, 0.08f);
         flash->intensity = 3.0f;
@@ -432,6 +435,13 @@ float Meteor::HeightAt(float x, float z) const
         float sedge = std::exp(-r * r / (kSplashW * kSplashW));
         float spulse = im.a0 * 1.8f * std::cos(2.2f * t) * std::exp(-t / 2.8f);
         h += A * std::cos(phase) - spulse * sedge;
+
+        // Leading bore (see Common.hlsli).
+        float rb = kBoreC * t;
+        float wb = 16.0f + 0.05f * rb;
+        float xb = (r - rb) / wb;
+        float Ab = im.a0 * 2.2f * (80.0f / (80.0f + rb)) * std::exp(-t / 70.0f);
+        h += Ab * (std::exp(-xb * xb) - 0.4f * std::exp(-(xb + 1.6f) * (xb + 1.6f)));
     }
     return h;
 }
