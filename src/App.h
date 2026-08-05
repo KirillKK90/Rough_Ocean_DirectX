@@ -92,7 +92,7 @@ private:
     int uiTimeOfDay = 4;
     float uiWindDirDeg = 190.0f;
     float uiChopMul = 1.0f;
-    float uiFoamMul = 1.0f;
+    float uiFoamMul = 0.5f; // Foam slider: shown 0.50x..1.00x, maps to 0.1x..0.5x actual
     float uiAmpMul = 1.0f;
     float uiExposureMul = 1.0f;
     float uiCloudCover = 0.25f;

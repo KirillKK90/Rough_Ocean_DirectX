@@ -286,7 +286,10 @@ void App::ApplySeaState()
     oceanParams.choppiness = sp.chop * uiChopMul;
     oceanParams.foamBias = sp.foamBias;
     oceanParams.foamDecay = sp.foamDecay;
-    oceanParams.foamAdd = sp.foamAdd * uiFoamMul;
+    // The Foam slider reads 0.50x..1.00x (a clean, uncapped-looking control)
+    // but maps to a gentle actual whitecap range of 0.1x..0.5x of the preset.
+    float foamMul = 0.1f + (uiFoamMul - 0.5f) * 0.8f;
+    oceanParams.foamAdd = sp.foamAdd * foamMul;
     float a = XMConvertToRadians(uiWindDirDeg);
     oceanParams.windDir = XMFLOAT2(std::sin(a), std::cos(a));
     ampEstimate = sp.ampEst * uiAmpMul;
@@ -529,7 +532,7 @@ void App::BuildUi(float dt)
         }
         if (ImGui::SliderFloat("Choppiness", &uiChopMul, 0.0f, 1.6f, "%.2fx"))
             ApplySeaState();
-        if (ImGui::SliderFloat("Foam", &uiFoamMul, 0.0f, 2.5f, "%.2fx"))
+        if (ImGui::SliderFloat("Foam", &uiFoamMul, 0.5f, 1.0f, "%.2fx"))
             ApplySeaState();
         ImGui::SliderFloat("Wave speed", &uiTimeScale, 0.0f, 2.0f, "%.2fx");
     }

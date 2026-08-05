@@ -99,7 +99,12 @@ float4 PSOcean(VSOut i) : SV_Target
     float foamAcc = tFoam0.Sample(samLinearWrap, i.worldXZ * gCascade0.x) * i.fades.x
                   + tFoam1.Sample(samLinearWrap, i.worldXZ * gCascade1.x) * i.fades.y * 0.75;
     float foamTexture = Fbm(i.worldXZ * 0.9 + float2(0.07, 0.05) * gTime, 3);
-    float foam = saturate(foamAcc * gFoamAmount * (0.55 + 0.9 * foamTexture));
+    // Break the accumulated whitecap field into crest streaks and drop the thin
+    // veil below a threshold, so even heavy seas read as dark water with bright
+    // foam accents rather than a solid sheet (which a high, bright sun blows
+    // out). The surviving foam keeps full contrast.
+    float coverage = foamAcc * gFoamAmount * (0.30 + 0.85 * foamTexture);
+    float foam = saturate((coverage - 0.32) * 2.4);
     foam = foam * foam * (3.0 - 2.0 * foam);
     foam = saturate(foam + impFoam * (0.4 + 0.6 * foamTexture));
 
@@ -143,7 +148,17 @@ float4 PSOcean(VSOut i) : SV_Target
     float3 col = lerp(body, env, fres) + spec;
 
     // --- Foam ---
-    float3 foamCol = 0.75 * (NdL * gLightColor * (1.0 / PI) + ambient);
+    // Foam is a bright, near-white diffuse surface. Under a high, intense sun
+    // (e.g. noon) its irradiance is large on every whitecap at once, so a
+    // heavily-foamed sea (high sea states) would otherwise blow out to a
+    // featureless, over-bloomed white sheet. Softly roll the foam irradiance
+    // off toward a white point (luminance-preserving): dim foam at low sun is
+    // left essentially untouched, while bright foam is pulled back into the
+    // responsive part of the tonemap so the whitecaps keep their wave shape.
+    float3 foamIrr = NdL * gLightColor * (1.0 / PI) + ambient;
+    const float foamWhite = 3.0; // irradiance roll-off white point
+    float foamLum = dot(foamIrr, float3(0.2126, 0.7152, 0.0722));
+    float3 foamCol = 0.75 * foamIrr / (1.0 + foamLum / foamWhite);
     col = lerp(col, foamCol, foam);
 
     // --- Buoy lamp: small point light on nearby water ---
