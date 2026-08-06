@@ -161,7 +161,7 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
 
         if (opts.meteorAt >= 0.0f && simTime >= opts.meteorAt && !meteorAutoLaunched)
         {
-            meteor.Launch(camera, uiMeteorPower);
+            LaunchMeteor();
             meteorAutoLaunched = true;
         }
 
@@ -349,6 +349,12 @@ void App::UpdateCameraInput(float dt)
         camera.Move(fwd * boost, right * boost, up * boost, dt);
 }
 
+void App::LaunchMeteor()
+{
+    meteor.Launch(camera, uiMeteorPower);
+    audio.PlayMeteor(MeteorSfx::Descent); // whoosh while it streaks down
+}
+
 D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
 {
     const LodPreset& lp = kLods[uiLod];
@@ -420,6 +426,14 @@ void App::RenderFrame(float dt)
 
     // Physics reads the readback slot BeginFrame just fenced.
     meteor.Update(dt * uiTimeScale);
+    // The moment the rock hits the water: splash + surge of spreading waves.
+    bool flyingNow = meteor.Flying();
+    if (prevMeteorFlying && !flyingNow)
+    {
+        audio.PlayMeteor(MeteorSfx::Impact);
+        audio.PlayMeteor(MeteorSfx::Waves);
+    }
+    prevMeteorFlying = flyingNow;
     meteor.UploadParticles(ctx);
     buoy.Update(ctx, ocean, &meteor, dt * uiTimeScale, simTime, oceanParams.choppiness);
 
@@ -511,7 +525,7 @@ void App::BuildUi(float dt)
         if (disabled)
             ImGui::BeginDisabled();
         if (ImGui::Button("Meteorite", ImVec2(-1, 0)))
-            meteor.Launch(camera, uiMeteorPower);
+            LaunchMeteor();
         if (disabled)
             ImGui::EndDisabled();
         ImGui::SliderFloat("Impact power", &uiMeteorPower, 1.0f, 8.0f, "%.1f m");
@@ -631,7 +645,7 @@ LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == VK_ESCAPE)
             PostQuitMessage(0);
         if (wp == 'M' && (!io || !io->WantCaptureKeyboard))
-            meteor.Launch(camera, uiMeteorPower);
+            LaunchMeteor();
         if (wp >= '1' && wp <= '0' + kNumTimes && (!io || !io->WantCaptureKeyboard))
         {
             uiTimeOfDay = int(wp - '1');

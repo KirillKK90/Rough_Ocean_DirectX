@@ -66,6 +66,7 @@ private:
     void ApplySeaState();
     void UpdateLighting();
     void UpdateCameraInput(float dt);
+    void LaunchMeteor(); // fires the rock + its descent sound
     void RenderFrame(float dt);
     void BuildUi(float dt);
     D3D12_GPU_VIRTUAL_ADDRESS FillFrameCB();
@@ -105,6 +106,7 @@ private:
     float uiMeteorPower = 4.0f;
     bool spectrumDirty = true;
     bool meteorAutoLaunched = false;
+    bool prevMeteorFlying = false; // edge-detects the water impact for its sound
 
     // Derived lighting.
     DirectX::XMFLOAT3 lightDir{ 0, 0.5f, 0.87f };

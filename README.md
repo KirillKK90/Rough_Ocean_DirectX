@@ -46,7 +46,9 @@ navigation buoy that bobs on the waves.
   trail, local wavenumber k = g·t²/4r²). Both decay by cylindrical spreading
   plus temporal damping, superimpose linearly with the FFT wind sea, rock the
   buoy as they pass, and the ocean returns to its undisturbed state within a
-  couple of minutes. Up to 4 impact wave systems can be live at once
+  couple of minutes. Up to 4 impact wave systems can be live at once. The
+  event is scored with three one-shot sounds — descent whoosh, impact splash,
+  and the surge of the first spreading waves
 - **Post-processing**: HDR (RGBA16F) → threshold bloom pyramid → ACES tonemap →
   FXAA; reversed-Z depth for horizon-scale precision
 - **Sound** (XAudio2, no music), two selectable modes:
@@ -59,6 +61,10 @@ navigation buoy that bobs on the waves.
     storm wind layer (rawer and more chaotic than the recording)
   - in both modes loudness follows the sea state, and fades with wave speed
     and camera altitude
+  - **meteorite event sounds**: a whoosh as the rock streaks down, a heavy
+    splash on impact, and a surge of the first powerful spreading waves —
+    three CC0 high-bitrate recordings (see `assets/CREDITS.txt`) played as
+    one-shots over the ambient bed
 - **Verification**: `--selftest` runs the GPU FFT against a CPU reference DFT;
   `--audiotest` prints synthesized sound levels per sea state
 
@@ -166,7 +172,10 @@ src/
   Post.*          bloom, ACES tonemap, FXAA
   Camera.h        free-look camera (reversed-Z projection)
 assets/
-  ocean_loop.mp3  CC0 wave recording for the Soothing sound mode (see CREDITS.txt)
+  ocean_loop.mp3     CC0 ambient wave recording for the Soothing mode (see CREDITS.txt)
+  meteor_descent.mp3 CC0 whoosh  — meteorite falling
+  meteor_impact.mp3  CC0 splash  — meteorite hitting the water
+  meteor_waves.mp3   CC0 wave crash — surge of the first spreading waves
 shaders/
   Common.hlsli    shared frame constants + BRDF/noise helpers
   OceanSim.hlsl   spectrum init/update, Stockham FFT, displacement assembly

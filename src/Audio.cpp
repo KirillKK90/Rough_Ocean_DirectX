@@ -237,6 +237,74 @@ namespace
         return L"";
     }
 
+    // Decode any Media-Foundation-supported audio file to interleaved float
+    // PCM at its native rate/channels. Used by the ambient loop and the
+    // meteorite one-shots.
+    bool DecodeMp3(const std::wstring& path, std::vector<float>& data,
+                   uint32_t& rate, uint16_t& channels)
+    {
+        data.clear();
+        rate = 0;
+        channels = 0;
+        if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE)))
+            return false;
+
+        bool ok = false;
+        {
+            ComPtr<IMFSourceReader> reader;
+            if (SUCCEEDED(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &reader)))
+            {
+                // Ask for float PCM; the reader inserts the decoder, native
+                // rate/channels are kept.
+                ComPtr<IMFMediaType> want;
+                MFCreateMediaType(&want);
+                want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+                want->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+                if (SUCCEEDED(reader->SetCurrentMediaType(
+                        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, want.Get())))
+                {
+                    ComPtr<IMFMediaType> got;
+                    reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), &got);
+                    UINT32 v = 0;
+                    got->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &v);
+                    rate = v;
+                    got->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &v);
+                    channels = static_cast<uint16_t>(v);
+
+                    for (;;)
+                    {
+                        DWORD flags = 0;
+                        ComPtr<IMFSample> sample;
+                        if (FAILED(reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM),
+                                                      0, nullptr, &flags, nullptr, &sample)))
+                            break;
+                        if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
+                        {
+                            ok = rate != 0 && channels != 0 && !data.empty();
+                            break;
+                        }
+                        if (!sample)
+                            continue;
+                        ComPtr<IMFMediaBuffer> buf;
+                        if (FAILED(sample->ConvertToContiguousBuffer(&buf)))
+                            break;
+                        BYTE* ptr = nullptr;
+                        DWORD len = 0;
+                        if (SUCCEEDED(buf->Lock(&ptr, nullptr, &len)))
+                        {
+                            size_t count = len / sizeof(float);
+                            const float* f = reinterpret_cast<const float*>(ptr);
+                            data.insert(data.end(), f, f + count);
+                            buf->Unlock();
+                        }
+                    }
+                }
+            }
+        }
+        MFShutdown();
+        return ok;
+    }
+
     bool LoadRecording(Recording& rec)
     {
         std::wstring path = FindAssetPath(L"ocean_loop.mp3");
@@ -245,68 +313,10 @@ namespace
             LogF("Audio: assets/ocean_loop.mp3 not found.\n");
             return false;
         }
-        if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE)))
-            return false;
-
-        bool ok = false;
         std::vector<float> data;
         uint32_t rate = 0;
         uint16_t channels = 0;
-        {
-            ComPtr<IMFSourceReader> reader;
-            if (FAILED(MFCreateSourceReaderFromURL(path.c_str(), nullptr, &reader)))
-            {
-                MFShutdown();
-                return false;
-            }
-            // Ask for float PCM; the reader inserts the decoder, native
-            // rate/channels are kept.
-            ComPtr<IMFMediaType> want;
-            MFCreateMediaType(&want);
-            want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-            want->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
-            if (SUCCEEDED(reader->SetCurrentMediaType(
-                    static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, want.Get())))
-            {
-                ComPtr<IMFMediaType> got;
-                reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), &got);
-                UINT32 v = 0;
-                got->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &v);
-                rate = v;
-                got->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &v);
-                channels = static_cast<uint16_t>(v);
-
-                for (;;)
-                {
-                    DWORD flags = 0;
-                    ComPtr<IMFSample> sample;
-                    if (FAILED(reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM),
-                                                  0, nullptr, &flags, nullptr, &sample)))
-                        break;
-                    if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
-                    {
-                        ok = rate != 0 && channels != 0 && !data.empty();
-                        break;
-                    }
-                    if (!sample)
-                        continue;
-                    ComPtr<IMFMediaBuffer> buf;
-                    if (FAILED(sample->ConvertToContiguousBuffer(&buf)))
-                        break;
-                    BYTE* ptr = nullptr;
-                    DWORD len = 0;
-                    if (SUCCEEDED(buf->Lock(&ptr, nullptr, &len)))
-                    {
-                        size_t count = len / sizeof(float);
-                        const float* f = reinterpret_cast<const float*>(ptr);
-                        data.insert(data.end(), f, f + count);
-                        buf->Unlock();
-                    }
-                }
-            }
-        }
-        MFShutdown();
-        if (!ok)
+        if (!DecodeMp3(path, data, rate, channels))
             return false;
 
         uint32_t frames = static_cast<uint32_t>(data.size() / channels);
@@ -350,6 +360,108 @@ namespace
         return true;
     }
 
+    // ------------------------------------------------------------------
+    // Meteorite event one-shots: decoded, peak-normalized 16-bit PCM held
+    // whole in memory and fired on demand through their own source voices.
+    // ------------------------------------------------------------------
+    struct Sfx
+    {
+        std::vector<int16_t> pcm; // interleaved
+        uint32_t rate = 0;
+        uint16_t channels = 0;
+        double seconds = 0;
+    };
+
+    // Load an event one-shot. When windowSec > 0 keep only the loudest window
+    // of that length (used to pull the punchiest crash out of a long wave
+    // recording); otherwise keep the whole clip. Peak-normalized, then lifted
+    // by upward "loudness" compression (drive > 1) so the event sits clearly
+    // above the ambient sea; short raised-cosine fades keep retriggers click-free.
+    bool LoadSfx(const wchar_t* name, Sfx& sfx, float windowSec, float drive)
+    {
+        std::wstring path = FindAssetPath(name);
+        if (path.empty())
+        {
+            LogF("Audio: assets/%ls not found.\n", name);
+            return false;
+        }
+        std::vector<float> data;
+        uint32_t rate = 0;
+        uint16_t channels = 0;
+        if (!DecodeMp3(path, data, rate, channels) || rate == 0 || channels == 0)
+            return false;
+
+        uint32_t frames = static_cast<uint32_t>(data.size() / channels);
+        if (frames == 0)
+            return false;
+
+        auto frameEnergy = [&](uint32_t f) {
+            double e = 0;
+            for (uint16_t c = 0; c < channels; ++c)
+            {
+                float s = data[size_t(f) * channels + c];
+                e += double(s) * s;
+            }
+            return e;
+        };
+
+        // Pick the most energetic window if asked; else keep everything.
+        uint32_t start = 0;
+        uint32_t keep = frames;
+        if (windowSec > 0.0f && frames > uint32_t(windowSec * rate))
+        {
+            uint32_t win = uint32_t(windowSec * rate);
+            double e = 0;
+            for (uint32_t f = 0; f < win; ++f)
+                e += frameEnergy(f);
+            double best = e;
+            uint32_t bestStart = 0;
+            for (uint32_t f = 1; f + win <= frames; ++f)
+            {
+                e += frameEnergy(f + win - 1) - frameEnergy(f - 1);
+                if (e > best)
+                {
+                    best = e;
+                    bestStart = f;
+                }
+            }
+            start = bestStart;
+            keep = win;
+        }
+
+        float peak = 1e-6f;
+        for (uint32_t f = 0; f < keep; ++f)
+            for (uint16_t c = 0; c < channels; ++c)
+                peak = std::max(peak, std::fabs(data[size_t(start + f) * channels + c]));
+        float norm = 1.0f / peak;                 // peak-normalize to unity first
+        float tdrive = std::max(drive, 1.0f);
+        float tnorm = std::tanh(tdrive);          // renormalizes so peak stays ~1
+        const float ceiling = 0.97f;              // leave a hair of headroom
+
+        uint32_t fade = std::min<uint32_t>(uint32_t(0.04f * rate), keep / 2);
+        sfx.pcm.resize(size_t(keep) * channels);
+        for (uint32_t f = 0; f < keep; ++f)
+        {
+            float env = 1.0f;
+            if (fade > 0 && f < fade)
+                env = 0.5f - 0.5f * std::cos(3.14159265f * f / fade);
+            else if (fade > 0 && f >= keep - fade)
+                env = 0.5f - 0.5f * std::cos(3.14159265f * (keep - 1 - f) / fade);
+            for (uint16_t c = 0; c < channels; ++c)
+            {
+                float v = data[size_t(start + f) * channels + c] * norm;
+                if (tdrive > 1.001f)
+                    v = std::tanh(tdrive * v) / tnorm; // lift the body, keep peak ~1
+                v = std::clamp(v * env * ceiling, -1.0f, 1.0f);
+                sfx.pcm[size_t(f) * channels + c] = static_cast<int16_t>(std::lround(v * 32767.0f));
+            }
+        }
+        sfx.rate = rate;
+        sfx.channels = channels;
+        sfx.seconds = double(keep) / rate;
+        return true;
+    }
+
     // XAudio2 buffer-completion callback: just wakes the synth thread.
     struct VoiceCallback : IXAudio2VoiceCallback
     {
@@ -370,6 +482,9 @@ struct OceanAudio::Impl
     IXAudio2MasteringVoice* masterVoice = nullptr;
     IXAudio2SourceVoice* synthVoice = nullptr;
     IXAudio2SourceVoice* recVoice = nullptr;
+    IXAudio2SourceVoice* sfxVoice[3] = {}; // indexed by MeteorSfx
+    Sfx sfx[3];
+    std::atomic<float> sfxVolume{ 0.8f };
     VoiceCallback callback;
     Synth synth;
     Recording rec;
@@ -497,6 +612,33 @@ bool OceanAudio::Init()
     if (!recordingLoaded)
         LogF("Audio: recording unavailable, falling back to synthesized sound.\n");
 
+    // Meteorite event one-shots (own source voices, played on demand).
+    // drive = upward loudness lift so events ride well above the ambient sea;
+    // the splash is peaky and needs the most.
+    struct SfxSpec { const wchar_t* file; float windowSec; float drive; };
+    const SfxSpec specs[3] = {
+        { L"meteor_descent.mp3", 0.0f, 3.5f }, // whoosh: whole clip
+        { L"meteor_impact.mp3",  0.0f, 6.0f }, // splash: whole clip (very peaky)
+        { L"meteor_waves.mp3",   7.0f, 3.0f }, // loudest 7 s of the crash
+    };
+    int sfxOk = 0;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!LoadSfx(specs[i].file, impl->sfx[i], specs[i].windowSec, specs[i].drive))
+            continue;
+        WAVEFORMATEX sf = {};
+        sf.wFormatTag = WAVE_FORMAT_PCM;
+        sf.nChannels = impl->sfx[i].channels;
+        sf.nSamplesPerSec = impl->sfx[i].rate;
+        sf.wBitsPerSample = 16;
+        sf.nBlockAlign = sf.nChannels * sf.wBitsPerSample / 8;
+        sf.nAvgBytesPerSec = sf.nSamplesPerSec * sf.nBlockAlign;
+        if (SUCCEEDED(impl->xaudio->CreateSourceVoice(&impl->sfxVoice[i], &sf)))
+            ++sfxOk;
+    }
+    meteorSfxLoaded = (sfxOk == 3);
+    LogF("Audio: meteorite one-shots loaded %d/3.\n", sfxOk);
+
     for (uint32_t i = 0; i < kNumBuffers; ++i)
         impl->SubmitNext();
     impl->synthVoice->Start(0);
@@ -525,6 +667,15 @@ void OceanAudio::Shutdown()
         impl->recVoice->Stop(0);
         impl->recVoice->DestroyVoice();
     }
+    for (IXAudio2SourceVoice*& v : impl->sfxVoice)
+    {
+        if (v)
+        {
+            v->Stop(0);
+            v->DestroyVoice();
+            v = nullptr;
+        }
+    }
     if (impl->masterVoice)
         impl->masterVoice->DestroyVoice();
     if (impl->xaudio)
@@ -545,7 +696,39 @@ void OceanAudio::SetParams(float storm01, float motion, float volume, SoundMode 
         mode = SoundMode::Realistic;
     impl->targetStorm.store(std::clamp(storm01, 0.0f, 1.0f));
     impl->targetMaster.store(std::clamp(volume, 0.0f, 1.0f) * std::clamp(motion, 0.0f, 1.0f));
+    impl->sfxVolume.store(std::clamp(volume, 0.0f, 1.0f)); // events ignore wave-speed
     impl->mode.store(int(mode));
+}
+
+void OceanAudio::PlayMeteor(MeteorSfx which)
+{
+    if (!impl)
+        return;
+    if (SoundMode(impl->mode.load()) == SoundMode::Off)
+        return; // sound turned off => silent
+    int i = int(which);
+    if (i < 0 || i >= 3 || !impl->sfxVoice[i])
+        return;
+    float vol = impl->sfxVolume.load();
+    if (vol <= 0.0f)
+        return;
+
+    // Per-event balance: the events are meant to be clearly louder than the sea.
+    const float gain[3] = { 1.05f, 1.20f, 1.10f };
+    // The splash silences the descent whoosh so they don't fight.
+    if (which == MeteorSfx::Impact && impl->sfxVoice[int(MeteorSfx::Descent)])
+        impl->sfxVoice[int(MeteorSfx::Descent)]->Stop(0);
+
+    IXAudio2SourceVoice* v = impl->sfxVoice[i];
+    v->Stop(0);
+    v->FlushSourceBuffers();
+    XAUDIO2_BUFFER xb = {};
+    xb.AudioBytes = static_cast<UINT32>(impl->sfx[i].pcm.size() * sizeof(int16_t));
+    xb.pAudioData = reinterpret_cast<const BYTE*>(impl->sfx[i].pcm.data());
+    xb.Flags = XAUDIO2_END_OF_STREAM;
+    v->SubmitSourceBuffer(&xb);
+    v->SetVolume(vol * gain[i]);
+    v->Start(0);
 }
 
 int OceanAudio::OfflineTest()
@@ -592,6 +775,31 @@ int OceanAudio::OfflineTest()
     {
         LogF("Recording: FAILED to load assets/ocean_loop.mp3\n");
         ok = false;
+    }
+
+    struct { const wchar_t* file; float windowSec; float drive; } sfxList[3] = {
+        { L"meteor_descent.mp3", 0.0f, 3.5f },
+        { L"meteor_impact.mp3", 0.0f, 6.0f },
+        { L"meteor_waves.mp3", 7.0f, 3.0f },
+    };
+    for (auto& s : sfxList)
+    {
+        Sfx sfx;
+        if (LoadSfx(s.file, sfx, s.windowSec, s.drive))
+        {
+            double sum2 = 0;
+            for (int16_t v : sfx.pcm) { double f = v / 32768.0; sum2 += f * f; }
+            double rms = std::sqrt(sum2 / std::max<size_t>(sfx.pcm.size(), 1));
+            LogF("SFX %-20ls: %.2f s, %u Hz, %u ch, RMS %.3f\n",
+                 s.file, sfx.seconds, sfx.rate, sfx.channels, rms);
+            if (sfx.seconds < 0.2 || rms < 0.01)
+                ok = false;
+        }
+        else
+        {
+            LogF("SFX %-20ls: FAILED to load\n", s.file);
+            ok = false;
+        }
     }
 
     LogF("Audio offline test: %s\n", ok ? "PASS" : "FAIL");

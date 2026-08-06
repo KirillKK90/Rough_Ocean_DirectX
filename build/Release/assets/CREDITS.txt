@@ -1,5 +1,23 @@
+All audio is CC0 (public domain) from BigSoundBank (Joseph SARDIN).
+Attribution appreciated but not required.
+
 ocean_loop.mp3
   "Sea Waves" — waves at the edge of the Atlantic Ocean
   (Soulac-sur-Mer to Lacanau, France), 2:46, stereo 48 kHz.
   Source: BigSoundBank, https://bigsoundbank.com/sea-waves-s0698.html
-  License: CC0 (public domain). Attribution appreciated but not required.
+
+meteor_descent.mp3
+  "Whoosh #4" — used for the meteorite streaking down through the sky.
+  Source: BigSoundBank sound #1796, https://bigsoundbank.com/whoosh-4-s1796.html
+
+meteor_impact.mp3
+  "Splash, big #3" — a big stone into a big water tank; used for the
+  meteorite hitting the sea. Source: BigSoundBank sound #1521,
+  https://bigsoundbank.com/sound-1521-splash-big-3.html
+
+meteor_waves.mp3
+  "Cliff #1" — waves crashing over a cliff; used for the surge of the
+  first powerful waves spreading out from the impact. This file is the
+  opening ~2 minutes of the recording; the app plays only its loudest
+  7-second window. Source: BigSoundBank sound #2570,
+  https://bigsoundbank.com/sound-2570-cliff-1.html
