@@ -25,6 +25,7 @@ struct LaunchOptions
     bool showUi = false;   // keep the UI visible in bench mode
     float fixedDt = 0;     // deterministic timestep for verification runs
     float meteorAt = -1;   // auto-launch a meteorite at this sim time
+    int clickMeteorX = -1, clickMeteorY = -1; // if set, place that meteor at a screen pixel (test hook)
     // Optional camera override (verification shots).
     bool hasCamera = false;
     float camX = 0, camY = 12, camZ = 0;
@@ -67,6 +68,7 @@ private:
     void UpdateLighting();
     void UpdateCameraInput(float dt);
     void LaunchMeteor(); // fires the rock + its descent sound
+    void LaunchMeteorAt(int mouseX, int mouseY); // click-to-place impact from the sky
     void RenderFrame(float dt);
     void BuildUi(float dt);
     D3D12_GPU_VIRTUAL_ADDRESS FillFrameCB();

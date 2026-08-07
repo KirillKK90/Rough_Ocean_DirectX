@@ -161,7 +161,10 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
 
         if (opts.meteorAt >= 0.0f && simTime >= opts.meteorAt && !meteorAutoLaunched)
         {
-            LaunchMeteor();
+            if (opts.clickMeteorX >= 0)
+                LaunchMeteorAt(opts.clickMeteorX, opts.clickMeteorY);
+            else
+                LaunchMeteor();
             meteorAutoLaunched = true;
         }
 
@@ -353,6 +356,49 @@ void App::LaunchMeteor()
 {
     meteor.Launch(camera, uiMeteorPower);
     audio.PlayMeteor(MeteorSfx::Descent); // whoosh while it streaks down
+}
+
+// Left-click the water to drop the meteorite exactly there. The incoming side
+// is mirrored from the clicked screen half: click the left of the view and it
+// streaks in from the right of the sky, and vice versa.
+void App::LaunchMeteorAt(int mouseX, int mouseY)
+{
+    if (meteor.Flying())
+        return;
+
+    // Pixel -> normalized device coords.
+    float ndcX = (mouseX + 0.5f) / float(ctx.width) * 2.0f - 1.0f;
+    float ndcY = 1.0f - (mouseY + 0.5f) / float(ctx.height) * 2.0f;
+
+    // World-space view ray (ViewProj is camera-relative, so the unprojected
+    // point is already a direction from the eye).
+    float aspect = float(ctx.width) / float(ctx.height);
+    XMMATRIX ivp = XMMatrixInverse(nullptr, camera.ViewProj(aspect));
+    XMVECTOR pw = XMVector4Transform(XMVectorSet(ndcX, ndcY, 0.5f, 1.0f), ivp);
+    XMFLOAT3 d;
+    XMStoreFloat3(&d, XMVector3Normalize(XMVectorScale(pw, 1.0f / XMVectorGetW(pw))));
+
+    // Intersect the mean water plane y = 0. Any ray dipping below the horizon
+    // hits it; only bail if the click is at or above the horizon line. Near the
+    // horizon the intersection races off to infinity, so clamp it to the
+    // visible sea (still far, still near the horizon on screen).
+    if (d.y >= -1e-4f)
+        return;
+    float t = std::min(-camera.pos.y / d.y, 25000.0f);
+    XMFLOAT3 target(camera.pos.x + d.x * t, 0.0f, camera.pos.z + d.z * t);
+
+    // Camera "right" in the horizontal plane (points to screen-right).
+    XMFLOAT3 r;
+    XMStoreFloat3(&r, XMVector3Normalize(XMVector3Cross(XMVectorSet(0, 1, 0, 0), camera.Forward())));
+    float rl = std::sqrt(r.x * r.x + r.z * r.z);
+    if (rl < 1e-4f)
+        return;
+    // Left half (ndcX < 0) -> come from the right -> travel left (-right); mirror otherwise.
+    float sign = (ndcX < 0.0f) ? -1.0f : 1.0f;
+    XMFLOAT3 approach(r.x / rl * sign, 0.0f, r.z / rl * sign);
+
+    meteor.LaunchAt(target, approach, uiMeteorPower);
+    audio.PlayMeteor(MeteorSfx::Descent);
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
@@ -613,6 +659,10 @@ LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                 post.Create(ctx, w, h);
             }
         }
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (!io || !io->WantCaptureMouse)
+            LaunchMeteorAt(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
     case WM_RBUTTONDOWN:
         if (!io || !io->WantCaptureMouse)

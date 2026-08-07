@@ -69,6 +69,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         else if (a == L"--pitch") { opts.hasCamera = true; opts.pitchDeg = std::wcstof(next().c_str(), nullptr); }
         else if (a == L"--fixeddt") opts.fixedDt = std::wcstof(next().c_str(), nullptr);
         else if (a == L"--meteor") opts.meteorAt = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--clickmeteor") // test hook: place the auto-meteor at a screen pixel
+        {
+            opts.clickMeteorX = std::wcstol(next().c_str(), nullptr, 10);
+            opts.clickMeteorY = std::wcstol(next().c_str(), nullptr, 10);
+        }
         else if (a == L"--help" || a == L"-h" || a == L"/?")
         {
             LogF("RoughOcean options:\n"

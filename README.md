@@ -36,7 +36,8 @@ navigation buoy that bobs on the waves.
 - **Buoy**: procedural mesh; buoyancy physics (heave spring + tilt inertia + anchored
   sway) driven by GPU→CPU readback of the displacement maps; alternating red/green
   flashing lamp with an HDR glow billboard and a point light on the surrounding water
-- **Meteorite strike** (button in the UI or `M` key): a rock streaks in at
+- **Meteorite strike** (left-click the water to place it exactly, or the UI
+  button / `M` key for a random spot): a rock streaks in at
   2.6 km/s on a ~45° trajectory — a half-second flash across the sky with a
   lingering fire/smoke trail — then detonates on the water. The impact radiates
   two wave systems: a **fast leading bore** (a foam-capped, tsunami-like
@@ -101,9 +102,12 @@ Studio and build/run from there.
 ## Controls
 
 - **Right mouse drag** — look around
+- **Left mouse click on the water** — drop a meteorite exactly there. Click the
+  left half of the view and it streaks in from the right of the sky; click the
+  right half and it comes from the left
 - **W A S D / Q E** — move (Shift = fast, mouse wheel = speed)
 - **1..7** — time of day presets
-- **M** — launch a meteorite (same as the UI button)
+- **M** — launch a meteorite at a random spot ahead (same as the UI button)
 - **Esc** — quit
 
 The on-screen panel exposes: **Level of detail** (Low / Medium / High / Ultra),

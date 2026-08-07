@@ -17,7 +17,10 @@ public:
     static constexpr uint32_t kMaxParticles = 768;
 
     void Create(GpuContext& ctx);
-    void Launch(const Camera& camera, float power);
+    void Launch(const Camera& camera, float power); // random spot ahead of the camera
+    // Fall exactly onto a chosen water point, approaching horizontally along
+    // approachHoriz (the direction of travel; its reverse is where it comes from).
+    void LaunchAt(const DirectX::XMFLOAT3& target, const DirectX::XMFLOAT3& approachHoriz, float power);
     void Update(float simDt);
 
     void UploadParticles(GpuContext& ctx);
@@ -62,6 +65,8 @@ private:
         DirectX::XMFLOAT4 color;
     };
 
+    void BeginFlight(const DirectX::XMFLOAT3& target, const DirectX::XMFLOAT2& uHoriz,
+                     float elevRad, float power);
     void EmitTrail(float dt);
     void SpawnImpact();
     Particle* AllocParticle();
@@ -79,6 +84,7 @@ private:
 
     bool flying = false;
     DirectX::XMFLOAT3 pos{}, vel{};
+    DirectX::XMFLOAT3 impactTarget{}; // exact water point to strike (wave center)
     float tumble = 0;
     float emitAccum = 0;
     float flightTime = 0;

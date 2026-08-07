@@ -129,18 +129,35 @@ void Meteor::Create(GpuContext& ctx)
     psoParticle->SetName(L"MeteorParticle");
 }
 
+// Set up the flight so the rock lands exactly at `target` (on the water plane)
+// approaching along the horizontal unit vector uHoriz at the given descent
+// elevation. Real meteorites hit at km/s — a half-second streak across the sky.
+void Meteor::BeginFlight(const XMFLOAT3& target, const XMFLOAT2& uHoriz, float elevRad,
+                         float impactPower)
+{
+    power = impactPower;
+    impactTarget = target; // the waves must radiate from exactly here
+    const float speed = 2600.0f, range = 1400.0f;
+    XMFLOAT3 dir(uHoriz.x * std::cos(elevRad), -std::sin(elevRad), uHoriz.y * std::cos(elevRad));
+    vel = XMFLOAT3(dir.x * speed, dir.y * speed, dir.z * speed);
+    pos = XMFLOAT3(target.x - dir.x * range, target.y - dir.y * range, target.z - dir.z * range);
+    tumble = Rand01() * 10.0f;
+    flightTime = 0;
+    emitAccum = 0;
+    flying = true;
+}
+
 void Meteor::Launch(const Camera& camera, float impactPower)
 {
     if (flying)
         return;
-    power = impactPower;
 
     // Impact point ahead of the camera, with some scatter.
     float cy = std::cos(camera.yaw), sy = std::sin(camera.yaw);
     XMFLOAT2 fwd(sy, cy), perp(cy, -sy);
     float dist = 150.0f + Rand01() * 60.0f;
     float lateral = (Rand01() - 0.5f) * 50.0f;
-    XMFLOAT2 target(camera.pos.x + fwd.x * dist + perp.x * lateral,
+    XMFLOAT3 target(camera.pos.x + fwd.x * dist + perp.x * lateral, 0.0f,
                     camera.pos.z + fwd.y * dist + perp.y * lateral);
 
     // Approach: ~45 degree descent, horizontal direction angled a little off
@@ -149,15 +166,18 @@ void Meteor::Launch(const Camera& camera, float impactPower)
     float cb = std::cos(beta), sb = std::sin(beta);
     XMFLOAT2 u(fwd.x * cb + perp.x * sb, fwd.y * cb + perp.y * sb);
     float elev = XMConvertToRadians(45.0f + (Rand01() - 0.5f) * 12.0f);
-    // Real meteorites hit at km/s — a half-second streak across the sky.
-    const float speed = 2600.0f, range = 1400.0f;
-    XMFLOAT3 dir(u.x * std::cos(elev), -std::sin(elev), u.y * std::cos(elev));
-    vel = XMFLOAT3(dir.x * speed, dir.y * speed, dir.z * speed);
-    pos = XMFLOAT3(target.x - dir.x * range, -dir.y * range, target.y - dir.z * range);
-    tumble = Rand01() * 10.0f;
-    flightTime = 0;
-    emitAccum = 0;
-    flying = true;
+    BeginFlight(target, u, elev, impactPower);
+}
+
+void Meteor::LaunchAt(const XMFLOAT3& target, const XMFLOAT3& approachHoriz, float impactPower)
+{
+    if (flying)
+        return;
+    float hl = std::sqrt(approachHoriz.x * approachHoriz.x + approachHoriz.z * approachHoriz.z);
+    XMFLOAT2 u = hl > 1e-4f ? XMFLOAT2(approachHoriz.x / hl, approachHoriz.z / hl)
+                            : XMFLOAT2(0.0f, 1.0f);
+    XMFLOAT3 t(target.x, 0.0f, target.z); // land on the mean water plane
+    BeginFlight(t, u, XMConvertToRadians(45.0f), impactPower);
 }
 
 Meteor::Particle* Meteor::AllocParticle()
@@ -237,9 +257,12 @@ void Meteor::SpawnImpact()
             if (im.t > slot->t)
                 slot = &im;
     }
+    // Centre everything on the intended target, not the rock's position: at
+    // km/s the rock overshoots the surface by tens of metres within one frame.
+    const float ix = impactTarget.x, iz = impactTarget.z;
     slot->active = true;
-    slot->x = pos.x;
-    slot->z = pos.z;
+    slot->x = ix;
+    slot->z = iz;
     slot->t = 0.001f;
     slot->a0 = power;
 
@@ -247,7 +270,7 @@ void Meteor::SpawnImpact()
     if (Particle* flash = AllocParticle())
     {
         flash->active = true;
-        flash->pos = XMFLOAT3(pos.x, 4.0f, pos.z);
+        flash->pos = XMFLOAT3(ix, 4.0f, iz);
         flash->vel = XMFLOAT3(0, 2, 0);
         flash->gravity = 0;
         flash->drag = 0;
@@ -268,7 +291,7 @@ void Meteor::SpawnImpact()
         float rad = 2.0f + Rand01() * 10.0f;
         float up = 14.0f + Rand01() * 22.0f;
         p->active = true;
-        p->pos = XMFLOAT3(pos.x + std::cos(ang) * rad * 0.3f, 1.0f, pos.z + std::sin(ang) * rad * 0.3f);
+        p->pos = XMFLOAT3(ix + std::cos(ang) * rad * 0.3f, 1.0f, iz + std::sin(ang) * rad * 0.3f);
         p->vel = XMFLOAT3(std::cos(ang) * rad, up, std::sin(ang) * rad);
         p->gravity = 16.0f;
         p->drag = 0.35f;
