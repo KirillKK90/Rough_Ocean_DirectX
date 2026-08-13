@@ -30,6 +30,9 @@ struct LaunchOptions
     float whirlAt = -1;    // auto-spawn a whirlpool at this sim time
     int clickWhirlX = -1, clickWhirlY = -1; // if set, place that whirlpool at a screen pixel (test hook)
     WhirlpoolParams whirl; // shape of CLI-spawned whirlpools (--whirldepth etc.)
+    int whirlPreset = kWhirlDefaultPreset; // --whirlstrength 0..6
+    int whirlCount = 1;      // how many to spawn (overlap test hook)
+    float whirlGap = 1.2f;   // seconds between them
     // Optional camera override (verification shots).
     bool hasCamera = false;
     float camX = 0, camY = 12, camZ = 0;
@@ -63,7 +66,9 @@ private:
         DirectX::XMFLOAT3 buoyLightColor; float fogDensity;
         DirectX::XMFLOAT2 windDir; float distRough; float pad0;
         DirectX::XMFLOAT4 impacts[Meteor::kMaxImpacts];
-        DirectX::XMFLOAT4 whirl, whirl2, whirl3;
+        DirectX::XMFLOAT4 whirl[Whirlpool::kMaxActive];
+        DirectX::XMFLOAT4 whirl2[Whirlpool::kMaxActive];
+        DirectX::XMFLOAT4 whirl3[Whirlpool::kMaxActive];
     };
 
     void InitWindow(HINSTANCE hInst);
@@ -118,9 +123,10 @@ private:
     float uiMeteorPower = 4.0f;
     int uiClickMode = 0;        // left-click event: 0 = meteorite, 1 = whirlpool
     WhirlpoolParams uiWhirl;    // shape of the next whirlpool
+    int uiWhirlPreset = kWhirlDefaultPreset; // strength preset driving uiWhirl
     bool spectrumDirty = true;
     bool meteorAutoLaunched = false;
-    bool whirlAutoSpawned = false;
+    int whirlAutoSpawned = 0;
     bool prevMeteorFlying = false; // edge-detects the water impact for its sound
 
     // Derived lighting.

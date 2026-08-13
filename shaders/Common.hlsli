@@ -26,9 +26,10 @@ cbuffer FrameCB : register(b0)
     float3 gBuoyLightColor; float gFogDensity;
     float2 gWindDir;        float gDistRough;     float gPad0;
     float4 gImpacts[4];     // xy = world XZ, z = seconds since impact (<0 off), w = amplitude
-    float4 gWhirl;          // xy = world XZ, z = seconds since spawn (<0 off), w = peak funnel depth m
-    float4 gWhirl2;         // x = spin-up s, y = decay s, z = peak core radius m, w = swirl gain (signed: <0 = clockwise)
-    float4 gWhirl3;         // x = draw-in, y = reach m, z = cull radius m, w = pattern dissolve s
+    // Up to WHIRL_MAX concurrent whirlpools (keep the 4s in sync).
+    float4 gWhirl[4];       // xy = world XZ, z = seconds since spawn (<0 off), w = peak funnel depth m
+    float4 gWhirl2[4];      // x = spin-up s, y = decay s, z = peak core radius m, w = swirl gain (signed: <0 = clockwise)
+    float4 gWhirl3[4];      // x = draw-in, y = reach m, z = cull radius m, w = pattern dissolve s
 }
 
 // Per-object constants.
@@ -188,7 +189,13 @@ void ImpactWaves(float2 worldXZ, out float3 disp, out float2 slope, out float fo
 // and the rebounding dimple radiates a small Cauchy-Poisson ring packet.
 // Keep the height terms in sync with Whirlpool.cpp (CPU mirror for buoy).
 //
-// Everything that shapes the vortex is a per-event runtime parameter (UI
+// Several whirlpools can be live at once. Each one's particle map is a
+// diffeomorphism, so they compose: the sample position is passed through each
+// vortex in turn and the Jacobians multiply by the chain rule (water wound by
+// one vortex and then pulled by the next). The surface fields - funnel,
+// spiral arms, rebound rings, foam - superpose linearly on top.
+//
+// Everything that shapes a vortex is a per-event runtime parameter (UI
 // sliders -> gWhirl/gWhirl2/gWhirl3), captured when it spawns:
 //   gWhirl.w   peak funnel depth D at full spin-up, metres
 //   gWhirl2.x  spin-up time: how long the "plug" keeps pulling
@@ -198,6 +205,7 @@ void ImpactWaves(float2 worldXZ, out float3 disp, out float2 slope, out float fo
 //   gWhirl3.x  draw-in: how strongly the surroundings converge on the drain
 //   gWhirl3.y  reach: distance scale over which the vortex disturbs the sea
 // ---------------------------------------------------------------------------
+static const int WHIRL_MAX = 4;              // must match the gWhirl* array sizes
 static const float WHIRL_G = 9.81;
 static const float WHIRL_BETA = 1.2564312;   // Lamb-Oseen peak-velocity constant
 static const float WHIRL_WIND_KNEE = 12.566; // 2 turns: winding is exact below this
@@ -230,10 +238,10 @@ void WhirlSoftLimit(float x, float knee, float lim, out float y, out float dydx)
 // >= 0; the spin direction rides on the sign of the gain), and the
 // warped-vs-plain sea blend weight (1 = fully wound, -> 0 as the pattern
 // dissolves after the vortex dies).
-void WhirlEnvelope(float age, out float rc, out float D, out float S, out float wBlend)
+void WhirlEnvelope(int i, float age, out float rc, out float D, out float S, out float wBlend)
 {
-    float depthPeak = gWhirl.w;
-    float grow = gWhirl2.x, tau = gWhirl2.y, rcPeak = gWhirl2.z;
+    float depthPeak = gWhirl[i].w;
+    float grow = gWhirl2[i].x, tau = gWhirl2[i].y, rcPeak = gWhirl2[i].z;
     float gmax = 2.0 * PI * rcPeak * sqrt(2.0 * WHIRL_G * depthPeak);
     float gam;
     if (age <= grow)
@@ -251,7 +259,7 @@ void WhirlEnvelope(float age, out float rc, out float D, out float S, out float 
         gam = gmax * e;
         S = gmax * (0.5 * grow + tau * (1.0 - e));
         rc = rcPeak * (1.0 + 0.5 * (1.0 - exp(-d / (1.6 * tau)))); // diffusive spread
-        wBlend = exp(-d / gWhirl3.w);
+        wBlend = exp(-d / gWhirl3[i].w);
     }
     D = gam * gam / (8.0 * PI * PI * WHIRL_G * rc * rc);
 }
@@ -261,10 +269,10 @@ void WhirlEnvelope(float age, out float rc, out float D, out float S, out float 
 // a Lamb-Oseen core rotates as a solid body, so there is no shear there to
 // wind a pattern up - which is also what keeps strong settings from grinding
 // the (mip-less) cascade textures into aliased noise.
-void WhirlWinding(float r, float rc, float S, out float Th, out float Thp)
+void WhirlWinding(int i, float r, float rc, float S, out float Th, out float Thp)
 {
-    float gain = gWhirl2.w;   // signed: negative spins the other way
-    float fadeR = gWhirl3.y;
+    float gain = gWhirl2[i].w;   // signed: negative spins the other way
+    float fadeR = gWhirl3[i].y;
     float eta = r * r / (rc * rc);
     float ebn = exp(-WHIRL_BETA * eta);
     float f = exp(-(r * r) / (fadeR * fadeR));
@@ -297,46 +305,46 @@ float3 WhirlDetailFades(float3 fades, float4 J)
     return float3(fades.x, fades.y * lerp(1.0, det, 0.6), fades.z * det);
 }
 
-// Vortex particle-map warp of the ambient-sea sampling. Returns the sample
-// position, the Jacobian J = d(samp)/d(world) packed as (J00,J01,J10,J11)
-// for gradient pull-back (slope_world = J^T slope_sampled), rotCS = (cos,sin)
-// of the local pattern rotation for horizontal-displacement vectors, and the
-// warped-vs-plain blend weight (0 = vortex off: sample the sea as usual).
-void WhirlWarp(float2 worldXZ, out float2 samp, out float4 J, out float2 rotCS,
-               out float wBlend)
+// One vortex's particle-map warp of the ambient-sea sampling. Returns the
+// sample position, the Jacobian J = d(samp)/d(p) packed as (J00,J01,J10,J11),
+// the pattern rotation angle, and this vortex's warped-vs-plain blend weight.
+// False means it contributes nothing here (inactive, or out of range).
+bool WhirlWarpOne(int i, float2 p, out float2 samp, out float4 J, out float th,
+                  out float wBlend)
 {
-    samp = worldXZ;
+    samp = p;
     J = float4(1, 0, 0, 1);
-    rotCS = float2(1, 0);
+    th = 0.0;
     wBlend = 0.0;
 
-    float age = gWhirl.z;
-    if (age <= 0.0 || gWhirl.w <= 0.0)
-        return;
-    float2 d = worldXZ - gWhirl.xy;
+    float age = gWhirl[i].z;
+    if (age <= 0.0 || gWhirl[i].w <= 0.0)
+        return false;
+    float2 d = p - gWhirl[i].xy;
     float r = max(length(d), 1e-3);
-    if (r > gWhirl3.z)
-        return;
+    if (r > gWhirl3[i].z)
+        return false;
 
     float rc, D, S, wb;
-    WhirlEnvelope(age, rc, D, S, wb);
+    WhirlEnvelope(i, age, rc, D, S, wb);
     wBlend = wb;
 
     float Th, Thp;
-    WhirlWinding(r, rc, S, Th, Thp);
+    WhirlWinding(i, r, rc, S, Th, Thp);
+    th = Th;
 
     // Sink pull rho(r) and drho/dr (softened at the core: the water that
     // converges past the throat plunges down the drain instead of piling up).
     // The drawn-in area saturates at (WHIRL_SINK_MAX * rc)^2 - a drain of a
     // given throat width can only swallow so much - which also bounds how far
     // the map compresses. Q is spatially constant, so this costs no chain rule.
-    float fadeR = gWhirl3.y;
+    float fadeR = gWhirl3[i].y;
     float rc2 = rc * rc;
     float eta = r * r / rc2;
     float en = exp(-eta);
     float f = exp(-(r * r) / (fadeR * fadeR));
     float fp = -2.0 * r / (fadeR * fadeR) * f;
-    float Q = gWhirl3.x * S;
+    float Q = gWhirl3[i].x * S;
     float Qmax = (WHIRL_SINK_MAX * rc) * (WHIRL_SINK_MAX * rc);
     Q = Qmax * Q / (Q + Qmax);
     float Qe = Q * (1.0 - en) * f;
@@ -351,7 +359,7 @@ void WhirlWarp(float2 worldXZ, out float2 samp, out float4 J, out float2 rotCS,
     float2 Gu = float2(u.y, -u.x);
     float2 RmGu = float2(c * Gu.x + s * Gu.y, -s * Gu.x + c * Gu.y);
 
-    samp = gWhirl.xy + rho * Rmu;
+    samp = gWhirl[i].xy + rho * Rmu;
 
     // J = a u^T + (rho/r) Rm (I - u u^T), a = d(samp)/dr.
     float2 a = rhop * Rmu + rho * Thp * RmGu;
@@ -360,27 +368,61 @@ void WhirlWarp(float2 worldXZ, out float2 samp, out float4 J, out float2 rotCS,
                a.x * u.y + k * ( s - Rmu.x * u.y),
                a.y * u.x + k * (-s - Rmu.y * u.x),
                a.y * u.y + k * ( c - Rmu.y * u.y));
-    rotCS = float2(c, s); // world vector = R(+Th) * sampled vector
+    return true;
 }
 
-// The whirlpool's own surface: funnel depression, wound spiral ripple arms,
-// churned foam collar, and the ring packet radiated by the collapse rebound.
-void WhirlWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foam)
+// Composed warp of every live vortex. Each map is applied to the previous
+// one's output and the Jacobians multiply (chain rule), so water wound by one
+// whirlpool is then carried by the next. rotCS = (cos,sin) of the total
+// pattern rotation, for horizontal-displacement vectors; wBlend is the
+// warped-vs-plain weight (0 = no vortex here: sample the sea as usual).
+// A vortex fully dissolves back to plain sea only where no live one overlaps
+// it - which the per-vortex cull radius already decides.
+void WhirlWarp(float2 worldXZ, out float2 samp, out float4 J, out float2 rotCS,
+               out float wBlend)
 {
-    disp = 0;
-    slope = 0;
-    foam = 0;
-    float age = gWhirl.z;
-    if (age <= 0.0 || gWhirl.w <= 0.0)
+    samp = worldXZ;
+    J = float4(1, 0, 0, 1);
+    float thTotal = 0.0;
+    float plainWeight = 1.0;
+
+    for (int i = 0; i < WHIRL_MAX; ++i)
+    {
+        float2 p;
+        float4 Ji;
+        float th, wb;
+        [branch] if (!WhirlWarpOne(i, samp, p, Ji, th, wb))
+            continue;
+        samp = p;
+        // J = Ji * J (2x2, row-major in xyzw)
+        J = float4(Ji.x * J.x + Ji.y * J.z, Ji.x * J.y + Ji.y * J.w,
+                   Ji.z * J.x + Ji.w * J.z, Ji.z * J.y + Ji.w * J.w);
+        thTotal += th;
+        plainWeight *= 1.0 - wb;
+    }
+
+    float s, c;
+    sincos(thTotal, s, c);
+    rotCS = float2(c, s); // world vector = R(+total) * sampled vector
+    wBlend = 1.0 - plainWeight;
+}
+
+// One whirlpool's own surface: funnel depression, wound spiral ripple arms,
+// churned foam collar, and the ring packet radiated by the collapse rebound.
+void WhirlWavesOne(int i, float2 worldXZ, inout float3 disp, inout float2 slope,
+                   inout float foam)
+{
+    float age = gWhirl[i].z;
+    if (age <= 0.0 || gWhirl[i].w <= 0.0)
         return;
-    float2 dv = worldXZ - gWhirl.xy;
+    float2 dv = worldXZ - gWhirl[i].xy;
     float r = max(length(dv), 1e-3);
-    if (r > gWhirl3.z)
+    if (r > gWhirl3[i].z)
         return;
     float2 u = dv / r;
 
     float rc, D, S, wb;
-    WhirlEnvelope(age, rc, D, S, wb);
+    WhirlEnvelope(i, age, rc, D, S, wb);
     float rc2 = rc * rc;
     float eta = r * r / rc2;
 
@@ -405,7 +447,7 @@ void WhirlWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foa
     // --- Spiral ripple arms: short waves wound by the differential rotation,
     // sharing Theta with the warp so they stay in phase with the dragged sea.
     float Th, Thp;
-    WhirlWinding(r, rc, S, Th, Thp);
+    WhirlWinding(i, r, rc, S, Th, Thp);
     // Arm wavelength and height scale with the core, so a wide maelstrom gets
     // long sweeping arms rather than the same centimetre ripples as a small one.
     float theta = atan2(dv.y, dv.x);
@@ -428,7 +470,7 @@ void WhirlWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foa
     // --- Collapse rebound: when the forcing stops, the recovering dimple
     // radiates a gentle dispersive ring packet (Cauchy-Poisson, like a small
     // inverted impact).
-    float dAge = age - gWhirl2.x;
+    float dAge = age - gWhirl2[i].x;
     [branch] if (dAge > 0.05)
     {
         float rr = max(r, 0.6 * rc);
@@ -437,7 +479,7 @@ void WhirlWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foa
         float k0 = 2.0 * PI / (2.5 * rc);
         float lx = log(max(kloc / k0, 1e-6));
         float envr = exp(-lx * lx * 1.4);
-        float Ar = 0.32 * gWhirl.w * pow(rc / (rc + r), 0.8) * exp(-dAge / 4.5) * envr;
+        float Ar = 0.32 * gWhirl[i].w * pow(rc / (rc + r), 0.8) * exp(-dAge / 4.5) * envr;
         float sr, cr;
         sincos(phase, sr, cr);
         disp.y += Ar * cr;
@@ -445,6 +487,18 @@ void WhirlWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foa
         slope += u * detadr;
         foam += saturate((abs(detadr) - 0.06) * 5.0) * saturate(1.2 - r / (18.0 * rc));
     }
+}
+
+// Every live whirlpool's surface, superposed. Surface elevations add
+// linearly, so overlapping vortices simply sum - two drains side by side
+// share one churned trough between them.
+void WhirlWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foam)
+{
+    disp = 0;
+    slope = 0;
+    foam = 0;
+    for (int i = 0; i < WHIRL_MAX; ++i)
+        WhirlWavesOne(i, worldXZ, disp, slope, foam);
 }
 
 // Fullscreen triangle.

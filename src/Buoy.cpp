@@ -200,7 +200,7 @@ void Buoy::Update(GpuContext& ctx, Ocean& ocean, const Meteor* meteor, const Whi
     // and blend their slope into the sampled normal so the buoy rides them
     // like any other wave.
     bool meteorOn = meteor && meteor->AnyImpactActive();
-    bool whirlOn = whirl && whirl->Active();
+    bool whirlOn = whirl && whirl->AnyActive();
     if (meteorOn || whirlOn)
     {
         auto eventH = [&](float px, float pz)

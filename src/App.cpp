@@ -115,6 +115,7 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
     uiTimeOfDay = std::clamp(opts.timeOfDay, 0, kNumTimes - 1);
     uiVsync = opts.vsync;
     uiWhirl = opts.whirl;
+    uiWhirlPreset = std::clamp(opts.whirlPreset, 0, Whirlpool::PresetCount() - 1);
 
     HR(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
@@ -169,13 +170,14 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
                 LaunchMeteor();
             meteorAutoLaunched = true;
         }
-        if (opts.whirlAt >= 0.0f && simTime >= opts.whirlAt && !whirlAutoSpawned)
+        if (opts.whirlAt >= 0.0f && whirlAutoSpawned < opts.whirlCount
+            && simTime >= opts.whirlAt + whirlAutoSpawned * opts.whirlGap)
         {
             if (opts.clickWhirlX >= 0)
                 SpawnWhirlpoolAt(opts.clickWhirlX, opts.clickWhirlY);
             else
                 SpawnWhirlpool();
-            whirlAutoSpawned = true;
+            ++whirlAutoSpawned;
         }
 
         RenderFrame(dt);
@@ -425,20 +427,25 @@ void App::LaunchMeteorAt(int mouseX, int mouseY)
 // ahead of the camera (deterministic, so verification runs are repeatable).
 void App::SpawnWhirlpool()
 {
-    if (whirlpool.Active())
-        return;
     // Big vortices need room to read; small ones keep the close default view.
-    float dist = std::max(65.0f, 8.0f * Whirlpool::CoreRadius(uiWhirl));
+    float rc = Whirlpool::CoreRadius(uiWhirl);
+    float dist = std::max(65.0f, 8.0f * rc);
+    // Fan repeat presses out sideways so they overlap rather than stack: the
+    // first lands dead ahead, the rest alternate left and right of it.
+    uint32_t n = whirlpool.ActiveCount();
+    float lateral = 0.0f;
+    if (n > 0)
+        lateral = ((n & 1u) ? 1.0f : -1.0f) * float((n + 1) / 2) * 2.5f * rc;
+
     float cy = std::cos(camera.yaw), sy = std::sin(camera.yaw);
-    XMFLOAT3 target(camera.pos.x + sy * dist, 0.0f, camera.pos.z + cy * dist);
+    XMFLOAT3 target(camera.pos.x + sy * dist + cy * lateral, 0.0f,
+                    camera.pos.z + cy * dist - sy * lateral);
     whirlpool.Spawn(target, uiWhirl);
 }
 
 // Left-click the water in whirlpool mode: the vortex forms exactly there.
 void App::SpawnWhirlpoolAt(int mouseX, int mouseY)
 {
-    if (whirlpool.Active())
-        return;
     XMFLOAT3 target;
     if (!PickWater(mouseX, mouseY, target))
         return;
@@ -489,9 +496,7 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     cb.windDir = oceanParams.windDir;
     cb.distRough = 0.16f;
     meteor.FillImpacts(cb.impacts);
-    cb.whirl = whirlpool.CBValue();
-    cb.whirl2 = whirlpool.CBParams0();
-    cb.whirl3 = whirlpool.CBParams1();
+    whirlpool.FillCB(cb.whirl, cb.whirl2, cb.whirl3);
 
     void* p = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS va = ctx.AllocUpload(sizeof(FrameCB), &p);
@@ -631,13 +636,8 @@ void App::BuildUi(float dt)
             ImGui::EndDisabled();
         ImGui::SliderFloat("Impact power", &uiMeteorPower, 1.0f, 8.0f, "%.1f m");
 
-        bool wDisabled = whirlpool.Active();
-        if (wDisabled)
-            ImGui::BeginDisabled();
         if (ImGui::Button("Whirlpool", ImVec2(-1, 0)))
             SpawnWhirlpool();
-        if (wDisabled)
-            ImGui::EndDisabled();
     }
     ImGui::Separator();
 
@@ -651,18 +651,44 @@ void App::BuildUi(float dt)
                 ImGui::SetTooltip("%s", text);
         };
 
+        // Master strength: one step sets the whole pack below. The label picks
+        // up "(edited)" once any individual slider departs from the preset.
+        // Pre-formatted, because ImGui feeds the format string an int.
+        char strengthLabel[64];
+        bool onPreset = Whirlpool::MatchesPreset(uiWhirl, uiWhirlPreset);
+        snprintf(strengthLabel, sizeof(strengthLabel), "%s%s",
+                 Whirlpool::PresetName(uiWhirlPreset), onPreset ? "" : " (edited)");
+        if (ImGui::SliderInt("Strength", &uiWhirlPreset, 0, Whirlpool::PresetCount() - 1,
+                             strengthLabel))
+        {
+            bool cw = uiWhirl.clockwise; // spin direction is the user's own choice
+            uiWhirl = Whirlpool::Preset(uiWhirlPreset);
+            uiWhirl.clockwise = cw;
+        }
+        hint("Overall size and force, from a bathtub drain to a maelstrom.\n"
+             "Sets every slider below; tweak any of them afterwards to taste.");
+        ImGui::Spacing();
+
         // What the sliders add up to, in physical terms.
         ImGui::Text("Peak swirl %.1f m/s at r = %.1f m",
                     Whirlpool::PeakSwirlSpeed(uiWhirl), Whirlpool::CoreRadius(uiWhirl));
         ImGui::Text("Circulation %.0f m^2/s  |  %.1f turns  |  %.0f s event",
                     Whirlpool::Circulation(uiWhirl), Whirlpool::WindTurns(uiWhirl),
                     Whirlpool::Lifetime(uiWhirl));
-        if (whirlpool.Active())
+        // Live vortices, one bar each: they coexist and interact.
+        if (whirlpool.AnyActive())
         {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.1f / %.0f s", whirlpool.Age(), whirlpool.Lifetime());
-            ImGui::ProgressBar(whirlpool.Age() / std::max(whirlpool.Lifetime(), 1e-3f),
-                               ImVec2(-1, 0), buf);
+            for (uint32_t i = 0; i < Whirlpool::kMaxActive; ++i)
+            {
+                if (!whirlpool.SlotActive(i))
+                    continue;
+                float age = whirlpool.SlotAge(i), life = whirlpool.SlotLifetime(i);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%.1f / %.0f s", age, life);
+                ImGui::ProgressBar(age / std::max(life, 1e-3f), ImVec2(-1, 0), buf);
+            }
+            ImGui::TextDisabled("%u of %u live - click again to add more.",
+                                whirlpool.ActiveCount(), Whirlpool::kMaxActive);
         }
         else
         {
@@ -696,7 +722,10 @@ void App::BuildUi(float dt)
         hint("Spin direction seen from above.");
 
         if (ImGui::Button("Reset whirlpool", ImVec2(-1, 0)))
-            uiWhirl = WhirlpoolParams{};
+        {
+            uiWhirlPreset = kWhirlDefaultPreset;
+            uiWhirl = Whirlpool::Preset(uiWhirlPreset);
+        }
     }
 
     if (ImGui::CollapsingHeader("Waves", ImGuiTreeNodeFlags_DefaultOpen))
