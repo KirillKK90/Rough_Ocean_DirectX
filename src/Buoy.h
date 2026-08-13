@@ -6,6 +6,7 @@
 #include "Ocean.h"
 
 class Meteor;
+class Whirlpool;
 
 // Navigation buoy: procedural mesh, buoyancy physics driven by CPU water
 // samples, and an alternating red/green flashing lamp.
@@ -15,8 +16,8 @@ public:
     void Create(GpuContext& ctx);
 
     // Advance physics; ocean provides water height/normal at the anchor, and
-    // meteor (optional) adds impact ring waves.
-    void Update(GpuContext& ctx, Ocean& ocean, const Meteor* meteor,
+    // meteor / whirl (optional) add impact rings and the vortex funnel.
+    void Update(GpuContext& ctx, Ocean& ocean, const Meteor* meteor, const Whirlpool* whirl,
                 float dt, float simTime, float lambda);
 
     void Draw(GpuContext& ctx, D3D12_GPU_VIRTUAL_ADDRESS frameCB, const DirectX::XMFLOAT3& camPos);

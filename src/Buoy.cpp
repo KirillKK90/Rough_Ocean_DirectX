@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Meteor.h"
+#include "Whirlpool.h"
 
 using namespace DirectX;
 
@@ -189,20 +190,32 @@ void Buoy::BuildMesh(GpuContext& ctx)
     ibv = { ib->GetGPUVirtualAddress(), static_cast<UINT>(ibSize), DXGI_FORMAT_R32_UINT };
 }
 
-void Buoy::Update(GpuContext& ctx, Ocean& ocean, const Meteor* meteor,
+void Buoy::Update(GpuContext& ctx, Ocean& ocean, const Meteor* meteor, const Whirlpool* whirl,
                   float dt, float simTime, float lambda)
 {
     dt = std::min(dt, 0.05f);
     WaterSample ws = ocean.Sample(ctx, anchor.x, anchor.y, lambda);
 
-    // Meteorite impact rings: add their height and blend their slope into the
-    // sampled normal so the buoy rides them like any other wave.
-    if (meteor && meteor->AnyImpactActive())
+    // Event waves (meteorite impact rings, whirlpool funnel): add their height
+    // and blend their slope into the sampled normal so the buoy rides them
+    // like any other wave.
+    bool meteorOn = meteor && meteor->AnyImpactActive();
+    bool whirlOn = whirl && whirl->Active();
+    if (meteorOn || whirlOn)
     {
-        ws.height += meteor->HeightAt(anchor.x, anchor.y);
+        auto eventH = [&](float px, float pz)
+        {
+            float h = 0.0f;
+            if (meteorOn)
+                h += meteor->HeightAt(px, pz);
+            if (whirlOn)
+                h += whirl->HeightAt(px, pz);
+            return h;
+        };
+        ws.height += eventH(anchor.x, anchor.y);
         const float e = 2.0f;
-        float sx = (meteor->HeightAt(anchor.x + e, anchor.y) - meteor->HeightAt(anchor.x - e, anchor.y)) / (2 * e);
-        float sz = (meteor->HeightAt(anchor.x, anchor.y + e) - meteor->HeightAt(anchor.x, anchor.y - e)) / (2 * e);
+        float sx = (eventH(anchor.x + e, anchor.y) - eventH(anchor.x - e, anchor.y)) / (2 * e);
+        float sz = (eventH(anchor.x, anchor.y + e) - eventH(anchor.x, anchor.y - e)) / (2 * e);
         float nsx = -ws.normal.x / std::max(ws.normal.y, 0.2f) + sx;
         float nsz = -ws.normal.z / std::max(ws.normal.y, 0.2f) + sz;
         XMVECTOR n = XMVector3Normalize(XMVectorSet(-nsx, 1.0f, -nsz, 0));

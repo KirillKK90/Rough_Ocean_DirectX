@@ -74,6 +74,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             opts.clickMeteorX = std::wcstol(next().c_str(), nullptr, 10);
             opts.clickMeteorY = std::wcstol(next().c_str(), nullptr, 10);
         }
+        else if (a == L"--whirl") opts.whirlAt = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirldepth") opts.whirlDepth = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--clickwhirl") // test hook: place the auto-whirlpool at a screen pixel
+        {
+            opts.clickWhirlX = std::wcstol(next().c_str(), nullptr, 10);
+            opts.clickWhirlY = std::wcstol(next().c_str(), nullptr, 10);
+        }
         else if (a == L"--help" || a == L"-h" || a == L"/?")
         {
             LogF("RoughOcean options:\n"
@@ -87,6 +94,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
                  "  --campos X Y Z     camera position override\n"
                  "  --yaw D --pitch D  camera angles override (degrees)\n"
                  "  --meteor T         auto-launch a meteorite at sim time T seconds\n"
+                 "  --whirl T          auto-spawn a whirlpool at sim time T seconds\n"
+                 "  --whirldepth D     whirlpool peak funnel depth in meters (default 4.5)\n"
                  "  --fixeddt S        fixed timestep (deterministic runs)\n"
                  "  --novsync          disable vsync\n"
                  "  --selftest         run the GPU FFT correctness test and exit\n"

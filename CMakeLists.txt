@@ -13,6 +13,7 @@ add_executable(RoughOcean WIN32
     src/GpuContext.cpp
     src/Meteor.cpp
     src/Ocean.cpp
+    src/Whirlpool.cpp
     src/Sky.cpp
     src/Buoy.cpp
     src/Post.cpp

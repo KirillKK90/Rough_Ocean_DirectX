@@ -113,6 +113,7 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
     uiSeaState = std::clamp(opts.seaState, 0, 9);
     uiTimeOfDay = std::clamp(opts.timeOfDay, 0, kNumTimes - 1);
     uiVsync = opts.vsync;
+    uiWhirlDepth = std::clamp(opts.whirlDepth, 1.5f, 8.0f);
 
     HR(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
@@ -166,6 +167,14 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
             else
                 LaunchMeteor();
             meteorAutoLaunched = true;
+        }
+        if (opts.whirlAt >= 0.0f && simTime >= opts.whirlAt && !whirlAutoSpawned)
+        {
+            if (opts.clickWhirlX >= 0)
+                SpawnWhirlpoolAt(opts.clickWhirlX, opts.clickWhirlY);
+            else
+                SpawnWhirlpool();
+            whirlAutoSpawned = true;
         }
 
         RenderFrame(dt);
@@ -358,14 +367,9 @@ void App::LaunchMeteor()
     audio.PlayMeteor(MeteorSfx::Descent); // whoosh while it streaks down
 }
 
-// Left-click the water to drop the meteorite exactly there. The incoming side
-// is mirrored from the clicked screen half: click the left of the view and it
-// streaks in from the right of the sky, and vice versa.
-void App::LaunchMeteorAt(int mouseX, int mouseY)
+// Unproject a screen pixel onto the mean water plane y = 0.
+bool App::PickWater(int mouseX, int mouseY, XMFLOAT3& hit) const
 {
-    if (meteor.Flying())
-        return;
-
     // Pixel -> normalized device coords.
     float ndcX = (mouseX + 0.5f) / float(ctx.width) * 2.0f - 1.0f;
     float ndcY = 1.0f - (mouseY + 0.5f) / float(ctx.height) * 2.0f;
@@ -383,9 +387,24 @@ void App::LaunchMeteorAt(int mouseX, int mouseY)
     // horizon the intersection races off to infinity, so clamp it to the
     // visible sea (still far, still near the horizon on screen).
     if (d.y >= -1e-4f)
-        return;
+        return false;
     float t = std::min(-camera.pos.y / d.y, 25000.0f);
-    XMFLOAT3 target(camera.pos.x + d.x * t, 0.0f, camera.pos.z + d.z * t);
+    hit = XMFLOAT3(camera.pos.x + d.x * t, 0.0f, camera.pos.z + d.z * t);
+    return true;
+}
+
+// Left-click the water to drop the meteorite exactly there. The incoming side
+// is mirrored from the clicked screen half: click the left of the view and it
+// streaks in from the right of the sky, and vice versa.
+void App::LaunchMeteorAt(int mouseX, int mouseY)
+{
+    if (meteor.Flying())
+        return;
+
+    XMFLOAT3 target;
+    if (!PickWater(mouseX, mouseY, target))
+        return;
+    float ndcX = (mouseX + 0.5f) / float(ctx.width) * 2.0f - 1.0f;
 
     // Camera "right" in the horizontal plane (points to screen-right).
     XMFLOAT3 r;
@@ -399,6 +418,28 @@ void App::LaunchMeteorAt(int mouseX, int mouseY)
 
     meteor.LaunchAt(target, approach, uiMeteorPower);
     audio.PlayMeteor(MeteorSfx::Descent);
+}
+
+// Whirlpool UI button / V key / --whirl hook: open the drain a fixed way
+// ahead of the camera (deterministic, so verification runs are repeatable).
+void App::SpawnWhirlpool()
+{
+    if (whirlpool.Active())
+        return;
+    float cy = std::cos(camera.yaw), sy = std::sin(camera.yaw);
+    XMFLOAT3 target(camera.pos.x + sy * 65.0f, 0.0f, camera.pos.z + cy * 65.0f);
+    whirlpool.Spawn(target, uiWhirlDepth);
+}
+
+// Left-click the water in whirlpool mode: the vortex forms exactly there.
+void App::SpawnWhirlpoolAt(int mouseX, int mouseY)
+{
+    if (whirlpool.Active())
+        return;
+    XMFLOAT3 target;
+    if (!PickWater(mouseX, mouseY, target))
+        return;
+    whirlpool.Spawn(target, uiWhirlDepth);
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
@@ -445,6 +486,7 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     cb.windDir = oceanParams.windDir;
     cb.distRough = 0.16f;
     meteor.FillImpacts(cb.impacts);
+    cb.whirl = whirlpool.CBValue();
 
     void* p = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS va = ctx.AllocUpload(sizeof(FrameCB), &p);
@@ -472,6 +514,7 @@ void App::RenderFrame(float dt)
 
     // Physics reads the readback slot BeginFrame just fenced.
     meteor.Update(dt * uiTimeScale);
+    whirlpool.Update(dt * uiTimeScale);
     // The moment the rock hits the water: splash + surge of spreading waves.
     bool flyingNow = meteor.Flying();
     if (prevMeteorFlying && !flyingNow)
@@ -481,7 +524,7 @@ void App::RenderFrame(float dt)
     }
     prevMeteorFlying = flyingNow;
     meteor.UploadParticles(ctx);
-    buoy.Update(ctx, ocean, &meteor, dt * uiTimeScale, simTime, oceanParams.choppiness);
+    buoy.Update(ctx, ocean, &meteor, &whirlpool, dt * uiTimeScale, simTime, oceanParams.choppiness);
 
     sky.RecordGenerate(ctx, skyParams);
     ocean.RecordSimulation(ctx, simTime, dt * uiTimeScale, oceanParams, spectrumDirty);
@@ -565,8 +608,15 @@ void App::BuildUi(float dt)
         spectrumDirty = true;
     }
 
-    // Meteorite strike.
+    // Water events: what a left-click on the water does, plus buttons to fire
+    // either event ahead of the camera.
     {
+        ImGui::TextUnformatted("Left-click on water:");
+        ImGui::SameLine();
+        ImGui::RadioButton("Meteorite##click", &uiClickMode, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton("Whirlpool##click", &uiClickMode, 1);
+
         bool disabled = meteor.Flying();
         if (disabled)
             ImGui::BeginDisabled();
@@ -575,6 +625,15 @@ void App::BuildUi(float dt)
         if (disabled)
             ImGui::EndDisabled();
         ImGui::SliderFloat("Impact power", &uiMeteorPower, 1.0f, 8.0f, "%.1f m");
+
+        bool wDisabled = whirlpool.Active();
+        if (wDisabled)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Whirlpool", ImVec2(-1, 0)))
+            SpawnWhirlpool();
+        if (wDisabled)
+            ImGui::EndDisabled();
+        ImGui::SliderFloat("Funnel depth", &uiWhirlDepth, 1.5f, 8.0f, "%.1f m");
     }
     ImGui::Separator();
 
@@ -636,8 +695,8 @@ void App::BuildUi(float dt)
     }
 
     ImGui::Separator();
-    ImGui::TextDisabled("RMB drag: look around  |  WASD/QE: move");
-    ImGui::TextDisabled("Shift: fast  |  Wheel: speed  |  M: meteorite  |  Esc: quit");
+    ImGui::TextDisabled("RMB drag: look around  |  WASD/QE: move  |  LMB: water event");
+    ImGui::TextDisabled("Shift: fast  |  Wheel: speed  |  M: meteorite  |  V: whirlpool  |  Esc: quit");
     ImGui::End();
 }
 
@@ -662,7 +721,12 @@ LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_LBUTTONDOWN:
         if (!io || !io->WantCaptureMouse)
-            LaunchMeteorAt(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        {
+            if (uiClickMode == 1)
+                SpawnWhirlpoolAt(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            else
+                LaunchMeteorAt(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        }
         return 0;
     case WM_RBUTTONDOWN:
         if (!io || !io->WantCaptureMouse)
@@ -696,6 +760,8 @@ LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             PostQuitMessage(0);
         if (wp == 'M' && (!io || !io->WantCaptureKeyboard))
             LaunchMeteor();
+        if (wp == 'V' && (!io || !io->WantCaptureKeyboard))
+            SpawnWhirlpool();
         if (wp >= '1' && wp <= '0' + kNumTimes && (!io || !io->WantCaptureKeyboard))
         {
             uiTimeOfDay = int(wp - '1');

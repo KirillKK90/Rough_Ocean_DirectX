@@ -11,6 +11,7 @@
 #include "Ocean.h"
 #include "Post.h"
 #include "Sky.h"
+#include "Whirlpool.h"
 
 struct LaunchOptions
 {
@@ -26,6 +27,9 @@ struct LaunchOptions
     float fixedDt = 0;     // deterministic timestep for verification runs
     float meteorAt = -1;   // auto-launch a meteorite at this sim time
     int clickMeteorX = -1, clickMeteorY = -1; // if set, place that meteor at a screen pixel (test hook)
+    float whirlAt = -1;    // auto-spawn a whirlpool at this sim time
+    int clickWhirlX = -1, clickWhirlY = -1; // if set, place that whirlpool at a screen pixel (test hook)
+    float whirlDepth = 4.5f; // peak funnel depth for CLI-spawned whirlpools
     // Optional camera override (verification shots).
     bool hasCamera = false;
     float camX = 0, camY = 12, camZ = 0;
@@ -59,6 +63,7 @@ private:
         DirectX::XMFLOAT3 buoyLightColor; float fogDensity;
         DirectX::XMFLOAT2 windDir; float distRough; float pad0;
         DirectX::XMFLOAT4 impacts[Meteor::kMaxImpacts];
+        DirectX::XMFLOAT4 whirl;
     };
 
     void InitWindow(HINSTANCE hInst);
@@ -69,6 +74,10 @@ private:
     void UpdateCameraInput(float dt);
     void LaunchMeteor(); // fires the rock + its descent sound
     void LaunchMeteorAt(int mouseX, int mouseY); // click-to-place impact from the sky
+    void SpawnWhirlpool();                       // vortex a fixed way ahead of the camera
+    void SpawnWhirlpoolAt(int mouseX, int mouseY); // click-to-place vortex
+    // Unproject a screen pixel onto the mean water plane y = 0.
+    bool PickWater(int mouseX, int mouseY, DirectX::XMFLOAT3& hit) const;
     void RenderFrame(float dt);
     void BuildUi(float dt);
     D3D12_GPU_VIRTUAL_ADDRESS FillFrameCB();
@@ -85,6 +94,7 @@ private:
     Post post;
     OceanAudio audio;
     Meteor meteor;
+    Whirlpool whirlpool;
 
     OceanParams oceanParams;
     Sky::Params skyParams;
@@ -106,8 +116,11 @@ private:
     int uiSoundMode = int(SoundMode::Soothing);
     float uiVolume = 0.8f;
     float uiMeteorPower = 4.0f;
+    int uiClickMode = 0;        // left-click event: 0 = meteorite, 1 = whirlpool
+    float uiWhirlDepth = 4.5f;  // peak funnel depth, meters
     bool spectrumDirty = true;
     bool meteorAutoLaunched = false;
+    bool whirlAutoSpawned = false;
     bool prevMeteorFlying = false; // edge-detects the water impact for its sound
 
     // Derived lighting.

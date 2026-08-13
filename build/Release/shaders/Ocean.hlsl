@@ -44,10 +44,35 @@ VSOut VSOcean(VSIn v)
     float dist = length(v.off);
     float3 fades = CascadeFades(dist);
 
+    // Whirlpool: the ambient sea is sampled through the vortex particle map,
+    // so the existing waves visibly wind and converge into the drain. While
+    // the dead vortex's wound pattern dissolves (0 < wBlend < 1) both the
+    // warped and the plain sea are sampled and crossfaded.
+    float2 wSamp;
+    float4 wJ;
+    float2 wRot;
+    float wBlend;
+    WhirlWarp(worldXZ, wSamp, wJ, wRot, wBlend);
+
     float3 disp = 0;
-    disp += fades.x * tDisp0.SampleLevel(samLinearWrap, worldXZ * gCascade0.x, 0).xyz;
-    disp += fades.y * tDisp1.SampleLevel(samLinearWrap, worldXZ * gCascade1.x, 0).xyz;
-    disp += fades.z * tDisp2.SampleLevel(samLinearWrap, worldXZ * gCascade2.x, 0).xyz;
+    [branch] if (wBlend < 0.999)
+    {
+        float3 dp = 0;
+        dp += fades.x * tDisp0.SampleLevel(samLinearWrap, worldXZ * gCascade0.x, 0).xyz;
+        dp += fades.y * tDisp1.SampleLevel(samLinearWrap, worldXZ * gCascade1.x, 0).xyz;
+        dp += fades.z * tDisp2.SampleLevel(samLinearWrap, worldXZ * gCascade2.x, 0).xyz;
+        disp += (1.0 - wBlend) * dp;
+    }
+    [branch] if (wBlend > 0.001)
+    {
+        float3 dw = 0;
+        dw += fades.x * tDisp0.SampleLevel(samLinearWrap, wSamp * gCascade0.x, 0).xyz;
+        dw += fades.y * tDisp1.SampleLevel(samLinearWrap, wSamp * gCascade1.x, 0).xyz;
+        dw += fades.z * tDisp2.SampleLevel(samLinearWrap, wSamp * gCascade2.x, 0).xyz;
+        // rotate the sampled choppy vector into the wound pattern's frame
+        dw.xz = float2(wRot.x * dw.x - wRot.y * dw.z, wRot.y * dw.x + wRot.x * dw.z);
+        disp += wBlend * dw;
+    }
     disp.xz *= gLambda;
 
     // Meteorite impact rings superimpose linearly on the wind sea.
@@ -56,6 +81,13 @@ VSOut VSOcean(VSIn v)
     float impFoam;
     ImpactWaves(worldXZ, impDisp, impSlope, impFoam);
     disp += impDisp;
+
+    // Whirlpool funnel, spiral ripples and collapse rings.
+    float3 whDisp;
+    float2 whSlope;
+    float whFoam;
+    WhirlWaves(worldXZ, whDisp, whSlope, whFoam);
+    disp += whDisp;
 
     float3 rel = float3(v.off.x + disp.x, disp.y - gCamPos.y, v.off.y + disp.z);
     o.pos = mul(float4(rel, 1.0), gViewProj);
@@ -72,14 +104,37 @@ float4 PSOcean(VSOut i) : SV_Target
     float3 E = i.rel / dist;   // view ray (from eye)
     float3 V = -E;
 
-    // --- Normal from analytic derivatives, cascade-faded ---
-    float4 d0 = tDeriv0.Sample(samLinearWrap, i.worldXZ * gCascade0.x);
-    float4 d1 = tDeriv1.Sample(samLinearWrap, i.worldXZ * gCascade1.x);
-    float4 d2 = tDeriv2.Sample(samLinearWrap, i.worldXZ * gCascade2.x);
-    float4 d = d0 * i.fades.x + d1 * i.fades.y + d2 * i.fades.z;
+    // Whirlpool warp (must match VSOcean): sampled slopes come back through
+    // the Jacobian so lighting agrees with the wound displacement field.
+    float2 wSamp;
+    float4 wJ;
+    float2 wRot;
+    float wBlend;
+    WhirlWarp(i.worldXZ, wSamp, wJ, wRot, wBlend);
 
-    float2 slope = float2(d.x / max(1.0 + gLambda * d.z, 0.15),
-                          d.y / max(1.0 + gLambda * d.w, 0.15));
+    // --- Normal from analytic derivatives, cascade-faded ---
+    float2 slope = 0;
+    [branch] if (wBlend < 0.999)
+    {
+        float4 d0 = tDeriv0.Sample(samLinearWrap, i.worldXZ * gCascade0.x);
+        float4 d1 = tDeriv1.Sample(samLinearWrap, i.worldXZ * gCascade1.x);
+        float4 d2 = tDeriv2.Sample(samLinearWrap, i.worldXZ * gCascade2.x);
+        float4 d = d0 * i.fades.x + d1 * i.fades.y + d2 * i.fades.z;
+        slope += (1.0 - wBlend) * float2(d.x / max(1.0 + gLambda * d.z, 0.15),
+                                         d.y / max(1.0 + gLambda * d.w, 0.15));
+    }
+    [branch] if (wBlend > 0.001)
+    {
+        float4 d0 = tDeriv0.Sample(samLinearWrap, wSamp * gCascade0.x);
+        float4 d1 = tDeriv1.Sample(samLinearWrap, wSamp * gCascade1.x);
+        float4 d2 = tDeriv2.Sample(samLinearWrap, wSamp * gCascade2.x);
+        float4 d = d0 * i.fades.x + d1 * i.fades.y + d2 * i.fades.z;
+        float2 sw = float2(d.x / max(1.0 + gLambda * d.z, 0.15),
+                           d.y / max(1.0 + gLambda * d.w, 0.15));
+        // slope_world = J^T * slope_sampled
+        slope += wBlend * float2(wJ.x * sw.x + wJ.z * sw.y,
+                                 wJ.y * sw.x + wJ.w * sw.y);
+    }
 
     // Meteorite impact rings: analytic slopes give crisp per-pixel normals.
     float3 impDisp;
@@ -87,6 +142,13 @@ float4 PSOcean(VSOut i) : SV_Target
     float impFoam;
     ImpactWaves(i.worldXZ, impDisp, impSlope, impFoam);
     slope += impSlope;
+
+    // Whirlpool funnel, spiral ripples and collapse rings.
+    float3 whDisp;
+    float2 whSlope;
+    float whFoam;
+    WhirlWaves(i.worldXZ, whDisp, whSlope, whFoam);
+    slope += whSlope;
 
     float3 N = normalize(float3(-slope.x, 1.0, -slope.y));
     // keep normals from tipping past vertical toward the eye
@@ -96,9 +158,12 @@ float4 PSOcean(VSOut i) : SV_Target
     float NdV = max(dot(N, V), 1e-3);
 
     // --- Foam coverage ---
-    float foamAcc = tFoam0.Sample(samLinearWrap, i.worldXZ * gCascade0.x) * i.fades.x
-                  + tFoam1.Sample(samLinearWrap, i.worldXZ * gCascade1.x) * i.fades.y * 0.75;
-    float foamTexture = Fbm(i.worldXZ * 0.9 + float2(0.07, 0.05) * gTime, 3);
+    // The whitecap field is sampled through the same warp, so existing foam
+    // streaks get dragged into the vortex spiral along with the waves.
+    float2 foamXZ = lerp(i.worldXZ, wSamp, wBlend);
+    float foamAcc = tFoam0.Sample(samLinearWrap, foamXZ * gCascade0.x) * i.fades.x
+                  + tFoam1.Sample(samLinearWrap, foamXZ * gCascade1.x) * i.fades.y * 0.75;
+    float foamTexture = Fbm(foamXZ * 0.9 + float2(0.07, 0.05) * gTime, 3);
     // Break the accumulated whitecap field into crest streaks and drop the thin
     // veil below a threshold, so even heavy seas read as dark water with bright
     // foam accents rather than a solid sheet (which a high, bright sun blows
@@ -106,7 +171,7 @@ float4 PSOcean(VSOut i) : SV_Target
     float coverage = foamAcc * gFoamAmount * (0.30 + 0.85 * foamTexture);
     float foam = saturate((coverage - 0.32) * 2.4);
     foam = foam * foam * (3.0 - 2.0 * foam);
-    foam = saturate(foam + impFoam * (0.4 + 0.6 * foamTexture));
+    foam = saturate(foam + (impFoam + whFoam) * (0.4 + 0.6 * foamTexture));
 
     // --- Roughness: base + fading detail cascades add variance + foam ---
     float detailLoss = (1.0 - i.fades.y) * gCascade1.z + (1.0 - i.fades.z) * gCascade2.z;
