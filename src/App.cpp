@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdio>
 #include <vector>
 #include <wincodec.h>
 
@@ -113,7 +114,7 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
     uiSeaState = std::clamp(opts.seaState, 0, 9);
     uiTimeOfDay = std::clamp(opts.timeOfDay, 0, kNumTimes - 1);
     uiVsync = opts.vsync;
-    uiWhirlDepth = std::clamp(opts.whirlDepth, 1.5f, 8.0f);
+    uiWhirl = opts.whirl;
 
     HR(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
@@ -426,9 +427,11 @@ void App::SpawnWhirlpool()
 {
     if (whirlpool.Active())
         return;
+    // Big vortices need room to read; small ones keep the close default view.
+    float dist = std::max(65.0f, 8.0f * Whirlpool::CoreRadius(uiWhirl));
     float cy = std::cos(camera.yaw), sy = std::sin(camera.yaw);
-    XMFLOAT3 target(camera.pos.x + sy * 65.0f, 0.0f, camera.pos.z + cy * 65.0f);
-    whirlpool.Spawn(target, uiWhirlDepth);
+    XMFLOAT3 target(camera.pos.x + sy * dist, 0.0f, camera.pos.z + cy * dist);
+    whirlpool.Spawn(target, uiWhirl);
 }
 
 // Left-click the water in whirlpool mode: the vortex forms exactly there.
@@ -439,7 +442,7 @@ void App::SpawnWhirlpoolAt(int mouseX, int mouseY)
     XMFLOAT3 target;
     if (!PickWater(mouseX, mouseY, target))
         return;
-    whirlpool.Spawn(target, uiWhirlDepth);
+    whirlpool.Spawn(target, uiWhirl);
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
@@ -487,6 +490,8 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     cb.distRough = 0.16f;
     meteor.FillImpacts(cb.impacts);
     cb.whirl = whirlpool.CBValue();
+    cb.whirl2 = whirlpool.CBParams0();
+    cb.whirl3 = whirlpool.CBParams1();
 
     void* p = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS va = ctx.AllocUpload(sizeof(FrameCB), &p);
@@ -633,9 +638,66 @@ void App::BuildUi(float dt)
             SpawnWhirlpool();
         if (wDisabled)
             ImGui::EndDisabled();
-        ImGui::SliderFloat("Funnel depth", &uiWhirlDepth, 1.5f, 8.0f, "%.1f m");
     }
     ImGui::Separator();
+
+    // Whirlpool shape. Everything here is captured when a vortex spawns, so
+    // editing a slider never snaps one that is already spinning.
+    if (ImGui::CollapsingHeader("Whirlpool", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        auto hint = [](const char* text)
+        {
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", text);
+        };
+
+        // What the sliders add up to, in physical terms.
+        ImGui::Text("Peak swirl %.1f m/s at r = %.1f m",
+                    Whirlpool::PeakSwirlSpeed(uiWhirl), Whirlpool::CoreRadius(uiWhirl));
+        ImGui::Text("Circulation %.0f m^2/s  |  %.1f turns  |  %.0f s event",
+                    Whirlpool::Circulation(uiWhirl), Whirlpool::WindTurns(uiWhirl),
+                    Whirlpool::Lifetime(uiWhirl));
+        if (whirlpool.Active())
+        {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%.1f / %.0f s", whirlpool.Age(), whirlpool.Lifetime());
+            ImGui::ProgressBar(whirlpool.Age() / std::max(whirlpool.Lifetime(), 1e-3f),
+                               ImVec2(-1, 0), buf);
+        }
+        else
+        {
+            ImGui::TextDisabled("Idle - click the water (or press V) to open a drain.");
+        }
+
+        ImGui::SliderFloat("Funnel depth", &uiWhirl.depth, 0.5f, 30.0f, "%.1f m");
+        hint("How deep the funnel is pulled at full spin-up. This sets the\n"
+             "circulation too: the throat and the swirl speed grow with it.");
+        ImGui::SliderFloat("Vortex width", &uiWhirl.sizeMul, 0.4f, 3.0f, "%.2fx");
+        hint("Width of the throat, relative to the depth-matched default.\n"
+             "Narrow = a tight deep drain, wide = a broad slow maelstrom.");
+        ImGui::SliderFloat("Spin-up time", &uiWhirl.grow, 1.0f, 20.0f, "%.1f s");
+        hint("How long the force keeps pulling. The whirl deepens and widens\n"
+             "for this long, then the plug is released.");
+        ImGui::SliderFloat("Decay time", &uiWhirl.tau, 0.2f, 8.0f, "%.1f s");
+        hint("How fast it subsides once the force stops. The funnel collapses\n"
+             "over roughly this long, and the spiral unwinds over ~2x it.");
+        ImGui::SliderFloat("Swirl winding", &uiWhirl.gain, 0.0f, 8.0f, "%.2f");
+        hint("How far the surrounding waves are wound around the vortex.\n"
+             "0 = a pure sinking funnel with no spiral.");
+        ImGui::SliderFloat("Draw-in", &uiWhirl.sink, 0.0f, 0.40f, "%.3f");
+        hint("How strongly the surrounding water is sucked toward the drain.");
+        ImGui::SliderFloat("Reach", &uiWhirl.reach, 40.0f, 600.0f, "%.0f m");
+        hint("Distance scale over which the vortex disturbs the sea.");
+
+        int dir = uiWhirl.clockwise ? 1 : 0;
+        const char* dirs[] = { "Counter-clockwise", "Clockwise" };
+        if (ImGui::Combo("Rotation", &dir, dirs, 2))
+            uiWhirl.clockwise = (dir == 1);
+        hint("Spin direction seen from above.");
+
+        if (ImGui::Button("Reset whirlpool", ImVec2(-1, 0)))
+            uiWhirl = WhirlpoolParams{};
+    }
 
     if (ImGui::CollapsingHeader("Waves", ImGuiTreeNodeFlags_DefaultOpen))
     {

@@ -29,7 +29,7 @@ struct LaunchOptions
     int clickMeteorX = -1, clickMeteorY = -1; // if set, place that meteor at a screen pixel (test hook)
     float whirlAt = -1;    // auto-spawn a whirlpool at this sim time
     int clickWhirlX = -1, clickWhirlY = -1; // if set, place that whirlpool at a screen pixel (test hook)
-    float whirlDepth = 4.5f; // peak funnel depth for CLI-spawned whirlpools
+    WhirlpoolParams whirl; // shape of CLI-spawned whirlpools (--whirldepth etc.)
     // Optional camera override (verification shots).
     bool hasCamera = false;
     float camX = 0, camY = 12, camZ = 0;
@@ -63,7 +63,7 @@ private:
         DirectX::XMFLOAT3 buoyLightColor; float fogDensity;
         DirectX::XMFLOAT2 windDir; float distRough; float pad0;
         DirectX::XMFLOAT4 impacts[Meteor::kMaxImpacts];
-        DirectX::XMFLOAT4 whirl;
+        DirectX::XMFLOAT4 whirl, whirl2, whirl3;
     };
 
     void InitWindow(HINSTANCE hInst);
@@ -117,7 +117,7 @@ private:
     float uiVolume = 0.8f;
     float uiMeteorPower = 4.0f;
     int uiClickMode = 0;        // left-click event: 0 = meteorite, 1 = whirlpool
-    float uiWhirlDepth = 4.5f;  // peak funnel depth, meters
+    WhirlpoolParams uiWhirl;    // shape of the next whirlpool
     bool spectrumDirty = true;
     bool meteorAutoLaunched = false;
     bool whirlAutoSpawned = false;

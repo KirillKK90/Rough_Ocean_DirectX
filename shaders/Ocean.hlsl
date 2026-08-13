@@ -65,10 +65,11 @@ VSOut VSOcean(VSIn v)
     }
     [branch] if (wBlend > 0.001)
     {
+        float3 fw = WhirlDetailFades(fades, wJ);
         float3 dw = 0;
-        dw += fades.x * tDisp0.SampleLevel(samLinearWrap, wSamp * gCascade0.x, 0).xyz;
-        dw += fades.y * tDisp1.SampleLevel(samLinearWrap, wSamp * gCascade1.x, 0).xyz;
-        dw += fades.z * tDisp2.SampleLevel(samLinearWrap, wSamp * gCascade2.x, 0).xyz;
+        dw += fw.x * tDisp0.SampleLevel(samLinearWrap, wSamp * gCascade0.x, 0).xyz;
+        dw += fw.y * tDisp1.SampleLevel(samLinearWrap, wSamp * gCascade1.x, 0).xyz;
+        dw += fw.z * tDisp2.SampleLevel(samLinearWrap, wSamp * gCascade2.x, 0).xyz;
         // rotate the sampled choppy vector into the wound pattern's frame
         dw.xz = float2(wRot.x * dw.x - wRot.y * dw.z, wRot.y * dw.x + wRot.x * dw.z);
         disp += wBlend * dw;
@@ -125,10 +126,11 @@ float4 PSOcean(VSOut i) : SV_Target
     }
     [branch] if (wBlend > 0.001)
     {
+        float3 fw = WhirlDetailFades(i.fades, wJ);
         float4 d0 = tDeriv0.Sample(samLinearWrap, wSamp * gCascade0.x);
         float4 d1 = tDeriv1.Sample(samLinearWrap, wSamp * gCascade1.x);
         float4 d2 = tDeriv2.Sample(samLinearWrap, wSamp * gCascade2.x);
-        float4 d = d0 * i.fades.x + d1 * i.fades.y + d2 * i.fades.z;
+        float4 d = d0 * fw.x + d1 * fw.y + d2 * fw.z;
         float2 sw = float2(d.x / max(1.0 + gLambda * d.z, 0.15),
                            d.y / max(1.0 + gLambda * d.w, 0.15));
         // slope_world = J^T * slope_sampled

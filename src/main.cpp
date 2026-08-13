@@ -6,6 +6,7 @@
 
 #include "App.h"
 #include "Audio.h"
+#include "Whirlpool.h"
 
 // Attach to the parent console (if launched from a terminal) so LogF output
 // is visible despite the WINDOWS subsystem.
@@ -75,7 +76,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             opts.clickMeteorY = std::wcstol(next().c_str(), nullptr, 10);
         }
         else if (a == L"--whirl") opts.whirlAt = std::wcstof(next().c_str(), nullptr);
-        else if (a == L"--whirldepth") opts.whirlDepth = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirldepth") opts.whirl.depth = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirlsize") opts.whirl.sizeMul = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirlgrow") opts.whirl.grow = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirltau") opts.whirl.tau = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirlgain") opts.whirl.gain = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirlsink") opts.whirl.sink = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirlreach") opts.whirl.reach = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--whirlcw") opts.whirl.clockwise = true;
         else if (a == L"--clickwhirl") // test hook: place the auto-whirlpool at a screen pixel
         {
             opts.clickWhirlX = std::wcstol(next().c_str(), nullptr, 10);
@@ -95,7 +103,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
                  "  --yaw D --pitch D  camera angles override (degrees)\n"
                  "  --meteor T         auto-launch a meteorite at sim time T seconds\n"
                  "  --whirl T          auto-spawn a whirlpool at sim time T seconds\n"
-                 "  --whirldepth D     whirlpool peak funnel depth in meters (default 4.5)\n"
+                 "  --whirldepth D     peak funnel depth, meters (default 4.5)\n"
+                 "  --whirlsize X      core-radius multiplier (default 1.0)\n"
+                 "  --whirlgrow S      spin-up time, seconds (default 5)\n"
+                 "  --whirltau S       decay time after release, seconds (default 1)\n"
+                 "  --whirlgain X      swirl winding of the surrounding sea (default 2.2)\n"
+                 "  --whirlsink X      draw-in toward the drain (default 0.10)\n"
+                 "  --whirlreach M     disturbance distance scale, meters (default 140)\n"
+                 "  --whirlcw          spin clockwise instead of counter-clockwise\n"
                  "  --fixeddt S        fixed timestep (deterministic runs)\n"
                  "  --novsync          disable vsync\n"
                  "  --selftest         run the GPU FFT correctness test and exit\n"
