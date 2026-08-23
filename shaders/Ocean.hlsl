@@ -246,5 +246,8 @@ float4 PSOcean(VSOut i) : SV_Target
     float fog = 1.0 - exp(-dist * gFogDensity);
     col = lerp(col, horizonCol, fog);
 
+    // Whirlpool drain mouth, after fog so its core stays absolutely black.
+    col *= 1.0 - WhirlDrainDarkness(i.worldXZ);
+
     return float4(col, 1.0);
 }

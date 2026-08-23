@@ -121,7 +121,7 @@ private:
     int uiSoundMode = int(SoundMode::Soothing);
     float uiVolume = 0.8f;
     float uiMeteorPower = 4.0f;
-    int uiClickMode = 0;        // left-click event: 0 = meteorite, 1 = whirlpool
+    int uiClickMode = 1;        // left-click event: 0 = meteorite, 1 = whirlpool
     WhirlpoolParams uiWhirl;    // shape of the next whirlpool
     int uiWhirlPreset = kWhirlDefaultPreset; // strength preset driving uiWhirl
     bool spectrumDirty = true;

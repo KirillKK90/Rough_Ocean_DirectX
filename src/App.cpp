@@ -618,26 +618,17 @@ void App::BuildUi(float dt)
         spectrumDirty = true;
     }
 
-    // Water events: what a left-click on the water does, plus buttons to fire
-    // either event ahead of the camera.
+    // Water events: what a left-click on the water does. Both events also fire
+    // from the keyboard (M / V), so there are no buttons here - a "Whirlpool"
+    // button would collide with the Whirlpool section header below, which Dear
+    // ImGui hashes to the same ID.
     {
         ImGui::TextUnformatted("Left-click on water:");
         ImGui::SameLine();
         ImGui::RadioButton("Meteorite##click", &uiClickMode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Whirlpool##click", &uiClickMode, 1);
-
-        bool disabled = meteor.Flying();
-        if (disabled)
-            ImGui::BeginDisabled();
-        if (ImGui::Button("Meteorite", ImVec2(-1, 0)))
-            LaunchMeteor();
-        if (disabled)
-            ImGui::EndDisabled();
         ImGui::SliderFloat("Impact power", &uiMeteorPower, 1.0f, 8.0f, "%.1f m");
-
-        if (ImGui::Button("Whirlpool", ImVec2(-1, 0)))
-            SpawnWhirlpool();
     }
     ImGui::Separator();
 

@@ -215,6 +215,7 @@ static const float WHIRL_STRETCH_KNEE = 12.0; // map stretch the cascades can st
 static const float WHIRL_SINK_MAX = 2.5;     // largest draw-in radius, in core radii
 static const float WHIRL_ARM_K = 14.8;       // spiral-arm wavenumber * core radius
 static const float WHIRL_ARM_FOAM = 68.4;    // arm-streak foam threshold * core radius
+static const float WHIRL_HOLE_R = 0.12;      // drain mouth radius, in core radii
 
 // Smooth saturating limiter: exactly the identity for |x| <= knee, asymptotes
 // to +-lim beyond it. Also returns dy/dx so warped gradients stay exact.
@@ -487,6 +488,43 @@ void WhirlWavesOne(int i, float2 worldXZ, inout float3 disp, inout float2 slope,
         slope += u * detadr;
         foam += saturate((abs(detadr) - 0.06) * 5.0) * saturate(1.2 - r / (18.0 * rc));
     }
+}
+
+// The drain mouth: an absolutely black disc at the throat, opening as the
+// vortex pulls the funnel down and closing again as it collapses. Its size
+// follows the funnel actually achieved (D relative to the peak the settings
+// ask for), so a stronger whirlpool tears a wider hole. Returned as a
+// darkening weight applied to the final shaded colour, after fog, so the
+// core stays absolutely black at any distance - the water is pouring into
+// something below the surface, not onto a dark patch painted on it.
+float WhirlDrainDarkness(float2 worldXZ)
+{
+    float dark = 0.0;
+    for (int i = 0; i < WHIRL_MAX; ++i)
+    {
+        float age = gWhirl[i].z;
+        [branch] if (age <= 0.0 || gWhirl[i].w <= 0.0)
+            continue;
+        // Conservative reject before any envelope work: the core can only
+        // spread to 1.5x its peak radius and `open` never exceeds 1, so this
+        // bounds the lit region without changing a pixel of the result.
+        float2 d = worldXZ - gWhirl[i].xy;
+        float r = length(d);
+        if (r > WHIRL_HOLE_R * 1.5 * gWhirl2[i].z * 2.8)
+            continue;
+
+        float rc, D, S, wb;
+        WhirlEnvelope(i, age, rc, D, S, wb);
+        float open = saturate(D / max(gWhirl[i].w, 1e-3)); // 0 at spawn -> 1 at full spin-up
+        float holeR = WHIRL_HOLE_R * rc * open;
+        [branch] if (holeR < 1e-3 || r > holeR * 2.8)
+            continue;
+
+        float core = 1.0 - smoothstep(holeR * 0.75, holeR * 1.05, r); // pure black
+        float shaft = 1.0 - smoothstep(holeR, holeR * 2.8, r);        // its shadowed lip
+        dark = max(dark, max(core, 0.7 * shaft));
+    }
+    return saturate(dark);
 }
 
 // Every live whirlpool's surface, superposed. Surface elevations add
