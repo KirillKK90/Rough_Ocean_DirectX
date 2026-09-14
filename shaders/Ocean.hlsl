@@ -37,6 +37,17 @@ float3 CascadeFades(float dist)
         exp(-dist / gCascade2.y));
 }
 
+// Distance-matched displacement mip: at range the radial mesh strides many
+// map texels per vertex, so sample the pyramid at the level whose texel pitch
+// matches the local vertex spacing. This is the vertex-shader counterpart of
+// the pixel shader's anisotropic filtering - without it the horizon geometry
+// point-samples fine waves and crawls.
+float CascadeLod(float dist, float invL)
+{
+    // vertex spacing (m) = dist * gGridScale; texel pitch (m) = L / N.
+    return log2(max(dist * gGridScale * gCascade1.w * invL, 1.0));
+}
+
 VSOut VSOcean(VSIn v)
 {
     VSOut o;
@@ -54,22 +65,27 @@ VSOut VSOcean(VSIn v)
     float wBlend;
     WhirlWarp(worldXZ, wSamp, wJ, wRot, wBlend);
 
+    float3 lods = float3(
+        CascadeLod(dist, gCascade0.x),
+        CascadeLod(dist, gCascade1.x),
+        CascadeLod(dist, gCascade2.x));
+
     float3 disp = 0;
     [branch] if (wBlend < 0.999)
     {
         float3 dp = 0;
-        dp += fades.x * tDisp0.SampleLevel(samLinearWrap, worldXZ * gCascade0.x, 0).xyz;
-        dp += fades.y * tDisp1.SampleLevel(samLinearWrap, worldXZ * gCascade1.x, 0).xyz;
-        dp += fades.z * tDisp2.SampleLevel(samLinearWrap, worldXZ * gCascade2.x, 0).xyz;
+        dp += fades.x * tDisp0.SampleLevel(samLinearWrap, worldXZ * gCascade0.x, lods.x).xyz;
+        dp += fades.y * tDisp1.SampleLevel(samLinearWrap, worldXZ * gCascade1.x, lods.y).xyz;
+        dp += fades.z * tDisp2.SampleLevel(samLinearWrap, worldXZ * gCascade2.x, lods.z).xyz;
         disp += (1.0 - wBlend) * dp;
     }
     [branch] if (wBlend > 0.001)
     {
         float3 fw = WhirlDetailFades(fades, wJ);
         float3 dw = 0;
-        dw += fw.x * tDisp0.SampleLevel(samLinearWrap, wSamp * gCascade0.x, 0).xyz;
-        dw += fw.y * tDisp1.SampleLevel(samLinearWrap, wSamp * gCascade1.x, 0).xyz;
-        dw += fw.z * tDisp2.SampleLevel(samLinearWrap, wSamp * gCascade2.x, 0).xyz;
+        dw += fw.x * tDisp0.SampleLevel(samLinearWrap, wSamp * gCascade0.x, lods.x).xyz;
+        dw += fw.y * tDisp1.SampleLevel(samLinearWrap, wSamp * gCascade1.x, lods.y).xyz;
+        dw += fw.z * tDisp2.SampleLevel(samLinearWrap, wSamp * gCascade2.x, lods.z).xyz;
         // rotate the sampled choppy vector into the wound pattern's frame
         dw.xz = float2(wRot.x * dw.x - wRot.y * dw.z, wRot.y * dw.x + wRot.x * dw.z);
         disp += wBlend * dw;
@@ -114,22 +130,41 @@ float4 PSOcean(VSOut i) : SV_Target
     WhirlWarp(i.worldXZ, wSamp, wJ, wRot, wBlend);
 
     // --- Normal from analytic derivatives, cascade-faded ---
+    // The maps are mip-chained and sampled anisotropically: each pixel gets
+    // the slope averaged over its own footprint. What the filter averages
+    // away is recovered as slope variance (E[s^2] rides in disp.w, CLEAN
+    // mapping) and widens the specular lobe below, so unresolved fine waves
+    // read as sheen instead of glinting per-pixel noise.
     float2 slope = 0;
+    float sigma2 = 0; // slope variance filtered out of the maps at this footprint
     [branch] if (wBlend < 0.999)
     {
-        float4 d0 = tDeriv0.Sample(samLinearWrap, i.worldXZ * gCascade0.x);
-        float4 d1 = tDeriv1.Sample(samLinearWrap, i.worldXZ * gCascade1.x);
-        float4 d2 = tDeriv2.Sample(samLinearWrap, i.worldXZ * gCascade2.x);
+        float4 d0 = tDeriv0.Sample(samAnisoWrap, i.worldXZ * gCascade0.x);
+        float4 d1 = tDeriv1.Sample(samAnisoWrap, i.worldXZ * gCascade1.x);
+        float4 d2 = tDeriv2.Sample(samAnisoWrap, i.worldXZ * gCascade2.x);
+        float m0 = tDisp0.Sample(samAnisoWrap, i.worldXZ * gCascade0.x).w;
+        float m1 = tDisp1.Sample(samAnisoWrap, i.worldXZ * gCascade1.x).w;
+        float m2 = tDisp2.Sample(samAnisoWrap, i.worldXZ * gCascade2.x).w;
+        float w = 1.0 - wBlend;
+        sigma2 += w * (i.fades.x * i.fades.x * max(0.0, m0 - 0.5 * dot(d0.xy, d0.xy))
+                     + i.fades.y * i.fades.y * max(0.0, m1 - 0.5 * dot(d1.xy, d1.xy))
+                     + i.fades.z * i.fades.z * max(0.0, m2 - 0.5 * dot(d2.xy, d2.xy)));
         float4 d = d0 * i.fades.x + d1 * i.fades.y + d2 * i.fades.z;
-        slope += (1.0 - wBlend) * float2(d.x / max(1.0 + gLambda * d.z, 0.15),
-                                         d.y / max(1.0 + gLambda * d.w, 0.15));
+        slope += w * float2(d.x / max(1.0 + gLambda * d.z, 0.15),
+                            d.y / max(1.0 + gLambda * d.w, 0.15));
     }
     [branch] if (wBlend > 0.001)
     {
         float3 fw = WhirlDetailFades(i.fades, wJ);
-        float4 d0 = tDeriv0.Sample(samLinearWrap, wSamp * gCascade0.x);
-        float4 d1 = tDeriv1.Sample(samLinearWrap, wSamp * gCascade1.x);
-        float4 d2 = tDeriv2.Sample(samLinearWrap, wSamp * gCascade2.x);
+        float4 d0 = tDeriv0.Sample(samAnisoWrap, wSamp * gCascade0.x);
+        float4 d1 = tDeriv1.Sample(samAnisoWrap, wSamp * gCascade1.x);
+        float4 d2 = tDeriv2.Sample(samAnisoWrap, wSamp * gCascade2.x);
+        float m0 = tDisp0.Sample(samAnisoWrap, wSamp * gCascade0.x).w;
+        float m1 = tDisp1.Sample(samAnisoWrap, wSamp * gCascade1.x).w;
+        float m2 = tDisp2.Sample(samAnisoWrap, wSamp * gCascade2.x).w;
+        sigma2 += wBlend * (fw.x * fw.x * max(0.0, m0 - 0.5 * dot(d0.xy, d0.xy))
+                          + fw.y * fw.y * max(0.0, m1 - 0.5 * dot(d1.xy, d1.xy))
+                          + fw.z * fw.z * max(0.0, m2 - 0.5 * dot(d2.xy, d2.xy)));
         float4 d = d0 * fw.x + d1 * fw.y + d2 * fw.z;
         float2 sw = float2(d.x / max(1.0 + gLambda * d.z, 0.15),
                            d.y / max(1.0 + gLambda * d.w, 0.15));
@@ -152,6 +187,13 @@ float4 PSOcean(VSOut i) : SV_Target
     WhirlWaves(i.worldXZ, whDisp, whSlope, whFoam);
     slope += whSlope;
 
+    // Screen-space slope derivatives catch whatever residual detail even the
+    // texture filter passes through (analytic impact/whirl waves included) -
+    // Tokuyoshi-style specular antialiasing.
+    float2 sdx = ddx(slope), sdy = ddy(slope);
+    sigma2 += 0.25 * (dot(sdx, sdx) + dot(sdy, sdy));
+    sigma2 = min(sigma2, 0.25);
+
     float3 N = normalize(float3(-slope.x, 1.0, -slope.y));
     // keep normals from tipping past vertical toward the eye
     if (dot(N, V) < 0.0)
@@ -163,9 +205,12 @@ float4 PSOcean(VSOut i) : SV_Target
     // The whitecap field is sampled through the same warp, so existing foam
     // streaks get dragged into the vortex spiral along with the waves.
     float2 foamXZ = lerp(i.worldXZ, wSamp, wBlend);
-    float foamAcc = tFoam0.Sample(samLinearWrap, foamXZ * gCascade0.x) * i.fades.x
-                  + tFoam1.Sample(samLinearWrap, foamXZ * gCascade1.x) * i.fades.y * 0.75;
+    float foamAcc = tFoam0.Sample(samAnisoWrap, foamXZ * gCascade0.x) * i.fades.x
+                  + tFoam1.Sample(samAnisoWrap, foamXZ * gCascade1.x) * i.fades.y * 0.75;
     float foamTexture = Fbm(foamXZ * 0.9 + float2(0.07, 0.05) * gTime, 3);
+    // The procedural break-up has no mip chain: ease it toward its mean at
+    // range so it doesn't reintroduce the speckle the filtered maps removed.
+    foamTexture = lerp(foamTexture, 0.55, saturate(dist / 900.0));
     // Break the accumulated whitecap field into crest streaks and drop the thin
     // veil below a threshold, so even heavy seas read as dark water with bright
     // foam accents rather than a solid sheet (which a high, bright sun blows
@@ -178,16 +223,24 @@ float4 PSOcean(VSOut i) : SV_Target
     // --- Roughness: base + fading detail cascades add variance + foam ---
     float detailLoss = (1.0 - i.fades.y) * gCascade1.z + (1.0 - i.fades.z) * gCascade2.z;
     float rough = saturate(gRoughBase + detailLoss + gDistRough * saturate(dist / 2500.0) + foam * 0.35);
+    // Widen the microfacet lobe by the filtered-out slope variance
+    // (alpha^2 ~ 2 sigma^2 for GGX). This is where sub-pixel wave detail goes
+    // instead of sparkling: the distant sea turns satin under the sun path.
+    float alpha = max(rough * rough, 0.0008);
+    alpha = sqrt(alpha * alpha + 2.0 * sigma2);
+    float roughEff = sqrt(alpha);
 
     // --- Sky reflection (pre-blurred + clamped against aureole fireflies) ---
     float3 R = reflect(E, N);
     R.y = abs(R.y) + 0.02;
     R = normalize(R);
-    float mip = 1.0 + rough * 4.5;
+    float mip = 1.0 + roughEff * 4.5;
     float3 env = tSky.SampleLevel(samLinearClamp, R, mip).rgb;
     env = min(env, 8.0);
 
     // --- Fresnel ---
+    // Uses the macro roughness only: filtered-out micro detail scatters the
+    // reflection (wider lobe) but does not destroy grazing reflectivity.
     float f0 = 0.02;
     float fres = f0 + (1.0 - f0) * pow(1.0 - NdV, 5.0);
     fres = saturate(fres * (1.0 - 0.6 * rough) + 0.35 * rough * f0);
@@ -198,10 +251,9 @@ float4 PSOcean(VSOut i) : SV_Target
     float3 H = normalize(V + L);
     float NdH = saturate(dot(N, H));
     float VdH = saturate(dot(V, H));
-    float a = max(rough * rough, 0.0008);
     float Fs = f0 + (1.0 - f0) * pow(1.0 - VdH, 5.0);
-    float3 spec = D_GGX(NdH, a) * V_SmithApprox(NdL, NdV, a) * Fs * NdL * gLightColor;
-    spec = min(spec, 30.0); // tame fireflies
+    float3 spec = D_GGX(NdH, alpha) * V_SmithApprox(NdL, NdV, alpha) * Fs * NdL * gLightColor;
+    spec = min(spec, 60.0); // tame residual fireflies (filtering does the real work)
 
     // --- Water body: ambient-lit deep color + subsurface scattering ---
     float3 ambient = tSky.SampleLevel(samLinearClamp, float3(0, 1, 0), 4.0).rgb;

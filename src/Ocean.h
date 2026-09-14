@@ -25,6 +25,14 @@ struct OceanParams
     float foamDecay = 0.30f;
     float foamAdd = 1.0f;
     uint32_t seed = 1234;
+    // Small-wave suppression length l (m): spectrum is damped by exp(-k^2 l^2),
+    // removing the sub-decimeter chop that only aliases into glint noise.
+    float smallCut = 0.033f;
+    // Long-crested swell from a distant storm (0 amplitude = off).
+    float swellAmp = 0.7f;        // target RMS surface amplitude, m
+    float swellLambda = 130.0f;   // peak wavelength, m
+    DirectX::XMFLOAT2 swellDir{ -0.64f, -0.77f }; // unit, travel direction
+    float swellSpread = 48.0f;    // directional lobe power (long-crested)
 };
 
 struct WaterSample
@@ -54,6 +62,9 @@ public:
     float CascadeLength(uint32_t c) const { return casc[c].L; }
     uint32_t NumCascades() const { return numCascades; }
     uint32_t FftN() const { return fftN; }
+    // Radial mesh vertex spacing per meter of camera distance (for the
+    // vertex shader's distance-matched displacement mip).
+    float GridScale() const { return gridScale; }
 
 private:
     struct Cascade
@@ -77,8 +88,12 @@ private:
     Cascade casc[kMaxCascades];
     uint32_t fftN = 256;
     uint32_t numCascades = 3;
+    uint32_t mipLevels = 1;       // full chain on disp/deriv/foam maps
+    float gridScale = 0.05f;
+    float swellAmpTexel = 0.0f;   // swellAmp / sqrt(sum G^2), cached per reinit
 
     ComPtr<ID3D12PipelineState> psoInit, psoUpdate, psoFFT, psoAssemble, psoDraw;
+    ComPtr<ID3D12PipelineState> psoMip4, psoMipF; // mip downsample: float4 maps, float foam
 
     ComPtr<ID3D12Resource> vb, ib;
     D3D12_VERTEX_BUFFER_VIEW vbv = {};

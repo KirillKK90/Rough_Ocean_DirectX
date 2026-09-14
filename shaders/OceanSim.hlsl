@@ -22,7 +22,11 @@ cbuffer SimCB : register(b0)
     float2 gWindD;   float gU10;      float gFetch;      // wind unit dir, speed m/s, fetch m
     float gAmp;      float gSpreadExp; float gMinK;    float gMaxK;
     float gChop;     float gFoamBias; float gFoamDecay; float gFoamAdd;
-    uint  gSeed;     uint gFFTDir;    float gSwellShape; float gPad1;
+    uint  gSeed;     uint gFFTDir;    float gSmallCut; float gSwellAmp;
+    float2 gSwellDir; float gSwellK;  float gSwellSpread;
+    // gSmallCut: small-wave suppression length l, m (Tessendorf exp(-k^2 l^2)).
+    // gSwellAmp: per-texel swell amplitude, already normalized on the CPU.
+    // gSwellDir/K/Spread: swell ridge direction, peak wavenumber, lobe power.
 }
 
 StructuredBuffer<float4>   SrvBuf0 : register(t0);
@@ -83,27 +87,48 @@ float DirectionalSpread(float2 kdir)
     return lerp(0.08, 1.0, s);
 }
 
+// Long-crested swell from a distant storm: a narrow Gaussian ridge in k
+// around gSwellK, focused into a tight one-sided directional lobe. Its energy
+// lives at the low-frequency end of the spectrum - big rolling waves, no
+// added chop. Keep in sync with the normalization sum in Ocean.cpp (CPU).
+float SwellShape(float klen, float2 khat)
+{
+    if (gSwellAmp <= 0.0 || gSwellK <= 0.0)
+        return 0.0;
+    float x = (klen - gSwellK) / (0.25 * gSwellK); // relative bandwidth 0.25
+    float lobe = pow(saturate(dot(khat, gSwellDir)), gSwellSpread);
+    return exp(-x * x) * lobe;
+}
+
 // Amplitude for one k-space texel (integrated over the texel's dk x dk cell).
 float SpectrumAmplitude(float2 k)
 {
     float klen = length(k);
     if (klen < gMinK || klen >= gMaxK || klen < 1e-5)
         return 0.0;
+    float2 khat = k / klen;
 
     float omega = sqrt(G * klen);
     float dwdk = G / (2.0 * omega);
     float dk = 2.0 * PI / gLpatch;
 
-    float S = JonswapS(omega) * DirectionalSpread(k / klen);
+    float S = JonswapS(omega) * DirectionalSpread(khat);
     float amp2 = 2.0 * S * dwdk / klen * dk * dk;
 
     // Soften the band edges so cascade splits don't ring.
     float edge = smoothstep(gMinK, gMinK * 1.25, klen) * (1.0 - smoothstep(gMaxK * 0.85, gMaxK, klen));
-    // Damp sub-texel capillary chop.
-    float lsmall = 1.4 / gMaxK;
-    edge *= exp(-klen * klen * lsmall * lsmall * 0.1);
+    // Tessendorf small-wave suppression: waves shorter than ~gSmallCut carry
+    // almost no visible shape - they only alias into glint noise - so their
+    // energy is removed at the source.
+    edge *= exp(-klen * klen * gSmallCut * gSmallCut);
 
-    return sqrt(max(amp2, 0.0)) * edge * gAmp;
+    float aWind = sqrt(max(amp2, 0.0)) * edge * gAmp;
+    // Swell is independent of the local wind sea; energies add, so the
+    // amplitudes combine in quadrature. gSwellAmp is pre-normalized on the
+    // CPU (divided by sqrt(sum G^2) over this cascade's k-grid) so the total
+    // swell energy is independent of patch size and FFT resolution.
+    float aSwell = gSwellAmp * SwellShape(klen, khat) * edge;
+    return sqrt(aWind * aWind + aSwell * aSwell);
 }
 
 float2 WaveK(uint2 id)
@@ -252,7 +277,12 @@ void CSAssemble(uint3 id : SV_DispatchThreadID)
     float dDy_dx = b0.w;
     float dDy_dz = b1.x, dDx_dx = b1.y, dDz_dz = b1.z, dDx_dz = b1.w;
 
-    OutDisplacement[id.xy] = float4(Dx, Dy, Dz, 0.0);
+    // Slope second moment rides in disp.w: mip-averaging E[s^2] alongside the
+    // mean slope lets the pixel shader recover the slope variance inside its
+    // filter footprint (CLEAN mapping) and widen the specular highlight by it,
+    // instead of the unresolved waves sparkling as per-pixel noise.
+    float M = 0.5 * (dDy_dx * dDy_dx + dDy_dz * dDy_dz);
+    OutDisplacement[id.xy] = float4(Dx, Dy, Dz, M);
     OutDerivatives[id.xy] = float4(dDy_dx, dDy_dz, dDx_dx, dDz_dz);
 
     // Jacobian of the horizontal (choppy) displacement: folding -> whitecaps.

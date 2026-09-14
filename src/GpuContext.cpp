@@ -410,11 +410,13 @@ static D3D12_STATIC_SAMPLER_DESC MakeSampler(UINT reg, D3D12_FILTER filter, D3D1
 
 void GpuContext::CreateRootSignatures()
 {
-    D3D12_STATIC_SAMPLER_DESC samplers[3] = {
+    D3D12_STATIC_SAMPLER_DESC samplers[4] = {
         MakeSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP),
         MakeSampler(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP),
         MakeSampler(2, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP),
+        MakeSampler(3, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_WRAP),
     };
+    samplers[3].MaxAnisotropy = 8; // ocean maps at grazing angles
 
     // --- Graphics ---
     {
@@ -438,7 +440,7 @@ void GpuContext::CreateRootSignatures()
         D3D12_ROOT_SIGNATURE_DESC rd = {};
         rd.NumParameters = 3;
         rd.pParameters = params;
-        rd.NumStaticSamplers = 3;
+        rd.NumStaticSamplers = 4;
         rd.pStaticSamplers = samplers;
         rd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -483,7 +485,7 @@ void GpuContext::CreateRootSignatures()
         D3D12_ROOT_SIGNATURE_DESC rd = {};
         rd.NumParameters = 7;
         rd.pParameters = params;
-        rd.NumStaticSamplers = 3;
+        rd.NumStaticSamplers = 4;
         rd.pStaticSamplers = samplers;
 
         ComPtr<ID3DBlob> blob, err;

@@ -3,6 +3,7 @@
 SamplerState samLinearWrap  : register(s0);
 SamplerState samLinearClamp : register(s1);
 SamplerState samPoint       : register(s2);
+SamplerState samAnisoWrap   : register(s3); // ocean maps at grazing angles
 
 static const float PI = 3.14159265359;
 
@@ -18,13 +19,13 @@ cbuffer FrameCB : register(b0)
     float3 gLightColor;     float gRoughBase;     // primary light radiance
     float3 gSunDiscColor;   float gLambda;        // disc radiance; wave choppiness
     float4 gCascade0;       // x = 1/L, y = fade distance, z = slope variance add, w = amplitude estimate
-    float4 gCascade1;
+    float4 gCascade1;       // w = FFT map resolution, texels (same for all cascades)
     float4 gCascade2;
     float3 gWaterDeep;      float gFoamAmount;
     float3 gWaterScatter;   float gSSS;
     float3 gBuoyLightPos;   float gBuoyLightOn;   // camera-relative position
     float3 gBuoyLightColor; float gFogDensity;
-    float2 gWindDir;        float gDistRough;     float gPad0;
+    float2 gWindDir;        float gDistRough;     float gGridScale; // radial mesh vertex spacing per meter of distance
     float4 gImpacts[4];     // xy = world XZ, z = seconds since impact (<0 off), w = amplitude
     // Up to WHIRL_MAX concurrent whirlpools (keep the 4s in sync).
     float4 gWhirl[4];       // xy = world XZ, z = seconds since spawn (<0 off), w = peak funnel depth m
@@ -293,12 +294,14 @@ void WhirlWinding(int i, float r, float rc, float S, out float Th, out float Thp
     Thp = dydx * rawp;
 }
 
-// Detail attenuation for the warped sea. The cascade textures have no mip
-// chain, so where the vortex map stretches a step far enough that the fine
-// ripples would be sampled below their own texel rate, they are faded out
-// rather than aliased into terracing - which is also what turbulence does to
-// ripples wound past the point of recognition. The knee sits above the
-// stretch a default whirlpool reaches, so it only engages on strong settings.
+// Detail attenuation for the warped sea. Where the vortex map stretches a
+// step far enough that the fine ripples would be sampled below their own
+// texel rate, they are faded out rather than aliased into terracing - which
+// is also what turbulence does to ripples wound past the point of
+// recognition. (The cascade maps carry mip chains now, but the vertex path
+// samples explicit levels, and the fade doubles as the physical churn look.)
+// The knee sits above the stretch a default whirlpool reaches, so it only
+// engages on strong settings.
 float3 WhirlDetailFades(float3 fades, float4 J)
 {
     float stretch = max(length(J.xy), length(J.zw));

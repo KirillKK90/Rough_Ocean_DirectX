@@ -307,7 +307,14 @@ void App::ApplySeaState()
     oceanParams.foamAdd = sp.foamAdd * foamMul;
     float a = XMConvertToRadians(uiWindDirDeg);
     oceanParams.windDir = XMFLOAT2(std::sin(a), std::cos(a));
-    ampEstimate = sp.ampEst * uiAmpMul;
+    oceanParams.smallCut = uiSmallCutCm * 0.01f;
+    oceanParams.swellAmp = uiSwellAmp;
+    oceanParams.swellLambda = uiSwellLambda;
+    // Swell arrives from a distant weather system, not the local wind: offset
+    // its direction 30 degrees so the two wave trains visibly cross.
+    float sa = XMConvertToRadians(uiWindDirDeg + 30.0f);
+    oceanParams.swellDir = XMFLOAT2(std::sin(sa), std::cos(sa));
+    ampEstimate = sp.ampEst * uiAmpMul + 0.6f * uiSwellAmp;
 }
 
 void App::UpdateLighting()
@@ -480,7 +487,7 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
 
     float wf = std::clamp(oceanParams.U10 / 12.0f, 0.05f, 1.2f);
     cb.cascade0 = XMFLOAT4(1.0f / ocean.CascadeLength(0), 1e8f, 0.0f, ampEstimate);
-    cb.cascade1 = XMFLOAT4(1.0f / ocean.CascadeLength(1), lp.fade1, 0.065f * wf, 0);
+    cb.cascade1 = XMFLOAT4(1.0f / ocean.CascadeLength(1), lp.fade1, 0.065f * wf, float(ocean.FftN()));
     cb.cascade2 = XMFLOAT4(1.0f / ocean.CascadeLength(2), lp.fade2, 0.100f * wf, 0);
 
     cb.waterDeep = XMFLOAT3(0.003f, 0.013f, 0.026f);
@@ -494,7 +501,10 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     cb.buoyLightColor = buoy.LightColor();
     cb.fogDensity = 1.0e-4f;
     cb.windDir = oceanParams.windDir;
-    cb.distRough = 0.16f;
+    // Filtered slope variance now supplies most of the distance roughness
+    // physically; this is only a gentle artistic floor on top.
+    cb.distRough = 0.10f;
+    cb.gridScale = ocean.GridScale();
     meteor.FillImpacts(cb.impacts);
     whirlpool.FillCB(cb.whirl, cb.whirl2, cb.whirl3);
 
@@ -736,6 +746,29 @@ void App::BuildUi(float dt)
         if (ImGui::SliderFloat("Foam", &uiFoamMul, 0.5f, 1.0f, "%.2fx"))
             ApplySeaState();
         ImGui::SliderFloat("Wave speed", &uiTimeScale, 0.0f, 2.0f, "%.2fx");
+        if (ImGui::SliderFloat("Swell height", &uiSwellAmp, 0.0f, 2.5f, "%.2f m"))
+        {
+            ApplySeaState();
+            spectrumDirty = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Long rolling waves from a distant storm, crossing\n"
+                              "the local wind sea at an angle. 0 = off.");
+        if (ImGui::SliderFloat("Swell length", &uiSwellLambda, 60.0f, 300.0f, "%.0f m"))
+        {
+            ApplySeaState();
+            spectrumDirty = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Crest-to-crest wavelength of the swell.");
+        if (ImGui::SliderFloat("Ripple cutoff", &uiSmallCutCm, 0.5f, 8.0f, "%.1f cm"))
+        {
+            ApplySeaState();
+            spectrumDirty = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Waves shorter than this are removed from the spectrum.\n"
+                              "Higher = calmer, cleaner surface with less glinting.");
     }
 
     if (ImGui::CollapsingHeader("Rendering"))

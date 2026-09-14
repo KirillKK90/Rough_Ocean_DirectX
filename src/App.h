@@ -64,7 +64,7 @@ private:
         DirectX::XMFLOAT3 waterScatter; float sss;
         DirectX::XMFLOAT3 buoyLightPos; float buoyLightOn;
         DirectX::XMFLOAT3 buoyLightColor; float fogDensity;
-        DirectX::XMFLOAT2 windDir; float distRough; float pad0;
+        DirectX::XMFLOAT2 windDir; float distRough; float gridScale;
         DirectX::XMFLOAT4 impacts[Meteor::kMaxImpacts];
         DirectX::XMFLOAT4 whirl[Whirlpool::kMaxActive];
         DirectX::XMFLOAT4 whirl2[Whirlpool::kMaxActive];
@@ -112,6 +112,9 @@ private:
     float uiChopMul = 1.0f;
     float uiFoamMul = 0.5f; // Foam slider: shown 0.50x..1.00x, maps to 0.1x..0.5x actual
     float uiAmpMul = 1.0f;
+    float uiSwellAmp = 0.7f;      // long-crested background swell height, m
+    float uiSwellLambda = 130.0f; // swell wavelength, m
+    float uiSmallCutCm = 3.3f;    // small-wave suppression length, cm
     float uiExposureMul = 1.0f;
     float uiCloudCover = 0.25f;
     float uiTimeScale = 1.0f;

@@ -11,14 +11,22 @@ namespace
 {
     constexpr float kTwoPi = 6.28318530718f;
 
-    // Mirrors SimCB in OceanSim.hlsl.
+    // Mirrors SimCB in OceanSim.hlsl. gFFTDir must stay the 18th 32-bit field
+    // (the FFT self-test fills the CB by raw offset).
     struct SimCB
     {
         uint32_t N; float L; float simTime; float dt;
         XMFLOAT2 windDir; float U10; float fetch;
         float amp; float spreadExp; float minK; float maxK;
         float chop; float foamBias; float foamDecay; float foamAdd;
-        uint32_t seed; uint32_t fftDir; float swellShape; float pad1;
+        uint32_t seed; uint32_t fftDir; float smallCut; float swellAmp;
+        XMFLOAT2 swellDir; float swellK; float swellSpread;
+    };
+
+    // Mirrors MipCB in OceanMip.hlsl.
+    struct MipCB
+    {
+        uint32_t dstSize; uint32_t pad[3];
     };
 
     D3D12_GPU_VIRTUAL_ADDRESS UploadCB(GpuContext& ctx, const SimCB& data)
@@ -66,7 +74,13 @@ void Ocean::Create(GpuContext& ctx, const OceanQuality& quality)
         casc[c].maxK = std::min(casc[c].maxK, nyquist);
     }
 
-    // Resources.
+    // Resources. The displacement/derivative/foam maps carry full mip chains,
+    // rebuilt each simulation step: sampled with aniso filtering at draw time
+    // they low-pass exactly the wave detail a pixel cannot resolve, which is
+    // what keeps the mid/far sea from shimmering with aliased glints.
+    mipLevels = 1;
+    while ((fftN >> mipLevels) > 0)
+        ++mipLevels;
     const uint64_t bufBytes = uint64_t(fftN) * fftN * 16;
     for (uint32_t c = 0; c < kMaxCascades; ++c)
     {
@@ -79,23 +93,23 @@ void Ocean::Create(GpuContext& ctx, const OceanQuality& quality)
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"OceanBuf1");
         C.disp = ctx.CreateTexture2D(fftN, fftN, DXGI_FORMAT_R16G16B16A16_FLOAT,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            1, 1, L"OceanDisp");
+            uint16_t(mipLevels), 1, L"OceanDisp");
         C.deriv = ctx.CreateTexture2D(fftN, fftN, DXGI_FORMAT_R16G16B16A16_FLOAT,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            1, 1, L"OceanDeriv");
+            uint16_t(mipLevels), 1, L"OceanDeriv");
         C.foam = ctx.CreateTexture2D(fftN, fftN, DXGI_FORMAT_R32_FLOAT,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            1, 1, L"OceanFoam");
+            uint16_t(mipLevels), 1, L"OceanFoam");
     }
 
-    // Descriptors: draw SRVs and assemble UAVs, fixed slots.
+    // Descriptors: draw SRVs (full mip chain) and assemble UAVs (mip 0).
     for (uint32_t c = 0; c < kMaxCascades; ++c)
     {
         Cascade& C = casc[c];
         D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
         sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        sd.Texture2D.MipLevels = 1;
+        sd.Texture2D.MipLevels = UINT(-1);
         sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         ctx.Dev()->CreateShaderResourceView(C.disp.Get(), &sd, ctx.SrvCpu(DescSlot::OceanDraw + 3 * c + 0));
         ctx.Dev()->CreateShaderResourceView(C.deriv.Get(), &sd, ctx.SrvCpu(DescSlot::OceanDraw + 3 * c + 1));
@@ -109,6 +123,30 @@ void Ocean::Create(GpuContext& ctx, const OceanQuality& quality)
         ctx.Dev()->CreateUnorderedAccessView(C.deriv.Get(), nullptr, &ud, ctx.SrvCpu(DescSlot::AssembleUav + 4 * c + 1));
         ud.Format = DXGI_FORMAT_R32_FLOAT;
         ctx.Dev()->CreateUnorderedAccessView(C.foam.Get(), nullptr, &ud, ctx.SrvCpu(DescSlot::AssembleUav + 4 * c + 2));
+
+        // Mip generation views: per map and mip m, SRV of m-1 and UAV of m.
+        ID3D12Resource* maps[3] = { C.disp.Get(), C.deriv.Get(), C.foam.Get() };
+        for (uint32_t t = 0; t < 3; ++t)
+        {
+            DXGI_FORMAT fmt = (t == 2) ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R16G16B16A16_FLOAT;
+            for (uint32_t m = 1; m < mipLevels; ++m)
+            {
+                uint32_t idx = (c * 3 + t) * 16 + (m - 1);
+                D3D12_SHADER_RESOURCE_VIEW_DESC ms = {};
+                ms.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                ms.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                ms.Format = fmt;
+                ms.Texture2D.MostDetailedMip = m - 1;
+                ms.Texture2D.MipLevels = 1;
+                ctx.Dev()->CreateShaderResourceView(maps[t], &ms, ctx.SrvCpu(DescSlot::OceanMipSrv + idx));
+
+                D3D12_UNORDERED_ACCESS_VIEW_DESC mu = {};
+                mu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                mu.Format = fmt;
+                mu.Texture2D.MipSlice = m;
+                ctx.Dev()->CreateUnorderedAccessView(maps[t], nullptr, &mu, ctx.SrvCpu(DescSlot::OceanMipUav + idx));
+            }
+        }
     }
 
     // Readback buffers (displacement of cascades 0..1, per frame in flight).
@@ -131,6 +169,11 @@ void Ocean::Create(GpuContext& ctx, const OceanQuality& quality)
     psoInit = ctx.CreateComputePso(ctx.CompileShader(simFile, "CSSpectrumInit", "cs_5_0").Get(), L"OceanInit");
     psoUpdate = ctx.CreateComputePso(ctx.CompileShader(simFile, "CSSpectrumUpdate", "cs_5_0").Get(), L"OceanUpdate");
     psoAssemble = ctx.CreateComputePso(ctx.CompileShader(simFile, "CSAssemble", "cs_5_0").Get(), L"OceanAssemble");
+
+    std::wstring mipFile = ctx.ShaderPath(L"OceanMip.hlsl");
+    D3D_SHADER_MACRO mipFoam[] = { {"MIP_TYPE", "float"}, {nullptr, nullptr} };
+    psoMip4 = ctx.CreateComputePso(ctx.CompileShader(mipFile, "CSMip", "cs_5_0").Get(), L"OceanMip4");
+    psoMipF = ctx.CreateComputePso(ctx.CompileShader(mipFile, "CSMip", "cs_5_0", mipFoam).Get(), L"OceanMipF");
 
     char nStr[16], logStr[8];
     uint32_t log2N = 0;
@@ -173,6 +216,10 @@ void Ocean::BuildMesh(GpuContext& ctx, const OceanQuality& quality)
     const uint32_t R = quality.rings;
     const float r0 = 1.5f;
     const float rMax = 42000.0f;
+    // Geometric ring growth: radial vertex spacing at distance d is
+    // d * ln(rMax/r0)/(R-1). The vertex shader matches its displacement mip
+    // to this so far geometry doesn't point-sample fine waves.
+    gridScale = std::log(rMax / r0) / float(R - 1);
 
     std::vector<XMFLOAT2> verts;
     verts.reserve(1 + size_t(S) * R);
@@ -249,6 +296,41 @@ void Ocean::RecordCascadeSim(GpuContext& ctx, uint32_t c, float simTime, float d
     cb.foamDecay = params.foamDecay;
     cb.foamAdd = params.foamAdd;
     cb.seed = params.seed + c * 7919;
+    cb.smallCut = params.smallCut;
+    cb.swellDir = params.swellDir;
+    cb.swellK = (params.swellLambda > 1.0f) ? kTwoPi / params.swellLambda : 0.0f;
+    cb.swellSpread = params.swellSpread;
+
+    if ((reinit || !h0Initialized[c]) && c == 0)
+    {
+        // Normalize the swell ridge over this cascade's k-grid (mirror of
+        // SwellShape in OceanSim.hlsl; band-edge softening is ~1 there). The
+        // per-texel amplitude is A / sqrt(sum G^2), so the swell's total
+        // energy is independent of patch size and FFT resolution.
+        swellAmpTexel = 0.0f;
+        if (params.swellAmp > 0.0f && cb.swellK > 0.0f)
+        {
+            double sum = 0.0;
+            for (uint32_t j = 0; j < fftN; ++j)
+                for (uint32_t i = 0; i < fftN; ++i)
+                {
+                    float kx = (float(i) - float(fftN) * 0.5f) * kTwoPi / C.L;
+                    float kz = (float(j) - float(fftN) * 0.5f) * kTwoPi / C.L;
+                    float klen = std::sqrt(kx * kx + kz * kz);
+                    if (klen < C.minK || klen >= C.maxK || klen < 1e-5f)
+                        continue;
+                    float x = (klen - cb.swellK) / (0.25f * cb.swellK);
+                    float d = (kx * params.swellDir.x + kz * params.swellDir.y) / klen;
+                    if (d <= 0.0f || x * x > 30.0f)
+                        continue;
+                    double g = std::exp(double(-x * x)) * std::pow(double(d), double(params.swellSpread));
+                    sum += g * g;
+                }
+            if (sum > 1e-12)
+                swellAmpTexel = params.swellAmp / float(std::sqrt(sum));
+        }
+    }
+    cb.swellAmp = swellAmpTexel; // out-of-band for cascades 1/2 anyway
 
     if (mapsEverSimulated[c])
     {
@@ -313,9 +395,58 @@ void Ocean::RecordCascadeSim(GpuContext& ctx, uint32_t c, float simTime, float d
     cmd->SetComputeRootDescriptorTable(6, ctx.SrvGpu(DescSlot::AssembleUav + 4 * c));
     cmd->Dispatch(groups, groups, 1);
 
-    ctx.Transition(C.disp.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kMapSrvState);
-    ctx.Transition(C.deriv.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kMapSrvState);
-    ctx.Transition(C.foam.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kMapSrvState);
+    // Rebuild the mip pyramids: box-filter each level from the previous one
+    // (the source mip moves UAV -> SRV per level, sky-cubemap pattern).
+    ID3D12Resource* maps[3] = { C.disp.Get(), C.deriv.Get(), C.foam.Get() };
+    for (uint32_t m = 1; m < mipLevels; ++m)
+    {
+        D3D12_RESOURCE_BARRIER bar[3] = {};
+        for (uint32_t t = 0; t < 3; ++t)
+        {
+            bar[t].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            bar[t].Transition.pResource = maps[t];
+            bar[t].Transition.Subresource = m - 1;
+            bar[t].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            bar[t].Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        }
+        cmd->ResourceBarrier(3, bar);
+
+        uint32_t mres = std::max(fftN >> m, 1u);
+        MipCB mcb = { mres, {} };
+        void* mp = nullptr;
+        D3D12_GPU_VIRTUAL_ADDRESS mva = ctx.AllocUpload(sizeof(MipCB), &mp);
+        memcpy(mp, &mcb, sizeof(MipCB));
+        for (uint32_t t = 0; t < 3; ++t)
+        {
+            uint32_t idx = (c * 3 + t) * 16 + (m - 1);
+            cmd->SetPipelineState(t == 2 ? psoMipF.Get() : psoMip4.Get());
+            cmd->SetComputeRootConstantBufferView(0, mva);
+            cmd->SetComputeRootDescriptorTable(5, ctx.SrvGpu(DescSlot::OceanMipSrv + idx));
+            cmd->SetComputeRootDescriptorTable(6, ctx.SrvGpu(DescSlot::OceanMipUav + idx));
+            cmd->Dispatch((mres + 7) / 8, (mres + 7) / 8, 1);
+        }
+    }
+
+    // Everything to the draw SRV state: mips 0..n-2 sit in NON_PIXEL after
+    // serving as downsample sources, the last mip is still UAV.
+    {
+        std::vector<D3D12_RESOURCE_BARRIER> done;
+        done.reserve(size_t(3) * mipLevels);
+        for (uint32_t t = 0; t < 3; ++t)
+            for (uint32_t m = 0; m < mipLevels; ++m)
+            {
+                D3D12_RESOURCE_BARRIER b = {};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                b.Transition.pResource = maps[t];
+                b.Transition.Subresource = m;
+                b.Transition.StateBefore = (m == mipLevels - 1)
+                    ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                    : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                b.Transition.StateAfter = kMapSrvState;
+                done.push_back(b);
+            }
+        cmd->ResourceBarrier(UINT(done.size()), done.data());
+    }
     mapsEverSimulated[c] = true;
 }
 

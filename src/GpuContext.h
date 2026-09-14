@@ -37,7 +37,11 @@ namespace DescSlot
     constexpr uint32_t SkyMipSrv = 84;     // per mip m: SRV of mip m-1
     constexpr uint32_t SkyMipUav = 96;     // per mip m: UAV of mip m
     constexpr uint32_t ImGuiFont = 110;
-    constexpr uint32_t Count = 128;
+    // Ocean cascade mip generation: per (cascade c, map t in {disp, deriv,
+    // foam}, mip m >= 1): SRV of mip m-1 and UAV of mip m, stride 16 mips.
+    constexpr uint32_t OceanMipSrv = 128;  // + (c*3 + t)*16 + (m-1)
+    constexpr uint32_t OceanMipUav = 288;  // + (c*3 + t)*16 + (m-1)
+    constexpr uint32_t Count = 448;
 }
 
 namespace RtvSlot
