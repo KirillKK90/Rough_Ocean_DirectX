@@ -16,9 +16,14 @@ namespace
     constexpr float kWindMax = 37.699f;   // 6 turns
     constexpr float kDissolveMul = 2.2f;  // pattern dissolve time, in decay times
     constexpr float kCullMul = 2.15f;     // cull radius, in reach lengths
+    // Collapse height terms; must match WHIRL_BOIL_* / WHIRL_REB_* in Common.hlsli.
+    constexpr float kBoilAmp = 0.12f, kBoilT = 1.0f, kBoilR = 1.5f;
+    constexpr float kRebR = 1.2f, kRebR0 = 0.6f, kRebLam = 3.0f, kRebAmp = 0.15f,
+                    kRebTau = 6.0f, kRebDelay = 1.0f;
 
     // CPU mirror of WhirlEnvelope (rc and D only; the wound-angle integral S
-    // drives the visual warp, which has no CPU consumer).
+    // drives the visual warp, which has no CPU consumer). Smoothstep ramp,
+    // sech release - C1 at the junction, so the buoy never takes a step.
     void Envelope(float age, const WhirlpoolParams& p, float& rc, float& D)
     {
         float rcPeak = Whirlpool::CoreRadius(p);
@@ -27,14 +32,17 @@ namespace
         if (age <= p.grow)
         {
             float u = age / p.grow;
-            gam = gmax * u;
-            rc = rcPeak * (0.35f + 0.65f * u);
+            float sm = u * u * (3.0f - 2.0f * u);
+            gam = gmax * sm;
+            rc = rcPeak * (0.6f + 0.4f * sm);
         }
         else
         {
-            float d = age - p.grow;
-            gam = gmax * std::exp(-d / p.tau);
-            rc = rcPeak * (1.0f + 0.5f * (1.0f - std::exp(-d / (1.6f * p.tau))));
+            float x = (age - p.grow) / p.tau;
+            float ex = std::exp(-x);
+            float sech = 2.0f * ex / (1.0f + ex * ex);
+            gam = gmax * sech;
+            rc = rcPeak * (1.0f + 0.5f * (1.0f - sech));
         }
         D = gam * gam / (8.0f * kPi * kPi * kG * rc * rc);
     }
@@ -57,14 +65,17 @@ namespace
     // depth, sizeMul, grow, tau, gain, sink, reach. Depth carries the power
     // (peak swirl ~ sqrt(2 g depth)); width, duration and reach grow with it
     // so every step stays a plausible vortex rather than a deeper spike.
+    // tau sits at roughly the gravity fill time 0.9 sqrt(depth), so the funnel
+    // drains over about one rotation instead of snapping shut; the gains wind
+    // the sea into a wide open spiral rather than a tight corrugation.
     const Preset kPresets[] = {
-        { "Weak",      {  1.5f, 0.9f,  3.0f, 0.8f, 1.4f, 0.06f,  70.0f } },
-        { "Medium",    {  4.5f, 1.0f,  5.0f, 1.0f, 2.2f, 0.10f, 140.0f } },
-        { "Strong",    {  8.0f, 1.1f,  6.5f, 1.3f, 2.8f, 0.14f, 200.0f } },
-        { "Super",     { 13.0f, 1.2f,  8.0f, 1.6f, 3.4f, 0.18f, 280.0f } },
-        { "Huge",      { 18.0f, 1.4f, 10.0f, 2.0f, 4.0f, 0.22f, 360.0f } },
-        { "Gigantic",  { 24.0f, 1.6f, 13.0f, 2.6f, 4.8f, 0.28f, 460.0f } },
-        { "Monstrous", { 30.0f, 1.8f, 16.0f, 3.2f, 5.6f, 0.34f, 600.0f } },
+        { "Weak",      {  1.5f, 0.9f,  3.0f, 1.2f, 1.0f, 0.06f,  70.0f } },
+        { "Medium",    {  4.5f, 1.0f,  5.0f, 2.0f, 1.6f, 0.10f, 140.0f } },
+        { "Strong",    {  8.0f, 1.1f,  6.5f, 2.6f, 2.0f, 0.14f, 200.0f } },
+        { "Super",     { 13.0f, 1.2f,  8.0f, 3.3f, 2.5f, 0.18f, 280.0f } },
+        { "Huge",      { 18.0f, 1.4f, 10.0f, 3.8f, 2.9f, 0.22f, 360.0f } },
+        { "Gigantic",  { 24.0f, 1.6f, 13.0f, 4.4f, 3.5f, 0.28f, 460.0f } },
+        { "Monstrous", { 30.0f, 1.8f, 16.0f, 5.0f, 4.1f, 0.34f, 600.0f } },
     };
     constexpr int kNumPresets = int(std::size(kPresets));
 }
@@ -190,8 +201,9 @@ void Whirlpool::FillCB(XMFLOAT4 whirl[kMaxActive], XMFLOAT4 whirl2[kMaxActive],
 
 float Whirlpool::HeightAt(float x, float z) const
 {
-    // Funnel + collapse-rebound rings, summed over every live vortex; mirrors
-    // WhirlWaves in Common.hlsli (the small spiral arms are ignored here).
+    // Funnel + collapse boil dome + rebound ring packet, summed over every
+    // live vortex; mirrors the height terms of WhirlWavesOne in Common.hlsli
+    // (the inward pull, the slopes and all foam are GPU-only).
     float h = 0.0f;
     for (const Vortex& w : v)
     {
@@ -208,18 +220,30 @@ float Whirlpool::HeightAt(float x, float z) const
         float eta = r * r / (rc * rc);
         h += -D / (1.0f + eta);
 
-        float dAge = w.t - p.grow;
-        if (dAge > 0.05f)
+        float d = w.t - p.grow;
+        if (d > 0.0f)
         {
-            float rr = std::max(r, 0.6f * rc);
-            float kloc = kG * dAge * dAge / (4.0f * rr * rr);
-            float phase = -kG * dAge * dAge / (4.0f * rr);
-            float k0 = 2.0f * kPi / (2.5f * rc);
-            float lx = std::log(std::max(kloc / k0, 1e-6f));
-            float envr = std::exp(-lx * lx * 1.4f);
-            float Ar = 0.32f * p.depth * std::pow(rc / (rc + r), 0.8f)
-                     * std::exp(-dAge / 4.5f) * envr;
-            h += Ar * std::cos(phase);
+            // depthPeak == p.depth and rcPeak == CoreRadius(p) on the CPU.
+            float rcR = kRebR * CoreRadius(p);
+            float etaR = r * r / (rcR * rcR);
+            float xb = d / (kBoilT * p.tau);
+            float xe = xb * xb * std::exp(2.0f * (1.0f - xb));
+            h += kBoilAmp * p.depth * xe * std::exp(-etaR / kBoilR);
+
+            float dR = d - kRebDelay * p.tau;
+            if (dR > 0.05f)
+            {
+                float r0 = kRebR0 * rcR;
+                float rr = std::sqrt(r * r + r0 * r0);
+                float kloc = kG * dR * dR / (4.0f * rr * rr);
+                float k0 = 2.0f * kPi / (kRebLam * rcR);
+                float phase = -kG * dR * dR / (4.0f * rr) + k0 * r0;
+                float lx = std::log(std::max(kloc / k0, 1e-6f));
+                float envr = std::exp(-lx * lx * 1.4f);
+                float Ar = kRebAmp * p.depth * std::sqrt(rcR / (rcR + r))
+                         * std::exp(-dR / kRebTau) * envr;
+                h += Ar * std::cos(phase);
+            }
         }
     }
     return h;

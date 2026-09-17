@@ -11,8 +11,8 @@ struct WhirlpoolParams
     float depth = 4.5f;    // peak funnel depth at full spin-up, meters
     float sizeMul = 1.0f;  // core-radius multiplier on the depth-derived width
     float grow = 5.0f;     // spin-up: how long the "plug" keeps pulling, s
-    float tau = 1.0f;      // circulation decay time once the forcing stops, s
-    float gain = 2.2f;     // how far the surrounding sea is wound in
+    float tau = 2.0f;      // circulation decay time once the forcing stops, s
+    float gain = 1.6f;     // how far the surrounding sea is wound in
     float sink = 0.10f;    // how strongly the surroundings converge on the drain
     float reach = 140.0f;  // distance scale of the disturbance, meters
     bool clockwise = false; // spin direction seen from above
@@ -28,8 +28,9 @@ constexpr int kWhirlDefaultPreset = 1;
 // Whirlpool events (left-click mode): bathtub / maelstrom vortices. A
 // Lamb-Oseen vortex over a softened sink spins up for `grow` seconds - the
 // funnel deepens and widens while the surrounding sea is wound into a spiral
-// - then the forcing stops and it relaxes away over ~`tau` seconds, radiating
-// a rebound ring packet. All surface math lives in Common.hlsli
+// - then the forcing stops and it relaxes away as sech(t/tau), overshooting
+// into a low boil dome that radiates a gentle ring packet. All surface math
+// lives in Common.hlsli
 // (WhirlEnvelope / WhirlWarp / WhirlWaves); this class owns the event state
 // and the CPU height mirror that feeds the buoy physics.
 //

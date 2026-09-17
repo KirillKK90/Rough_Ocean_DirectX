@@ -27,6 +27,7 @@ struct VSOut
     float2 worldXZ : TEXCOORD1;
     float3 fades : TEXCOORD2; // per-cascade distance fade
     float dispY : TEXCOORD3;
+    float2 gridXZ : TEXCOORD4; // undisplaced grid position = the surface parameter
 };
 
 float3 CascadeFades(float dist)
@@ -62,8 +63,8 @@ VSOut VSOcean(VSIn v)
     float2 wSamp;
     float4 wJ;
     float2 wRot;
-    float wBlend;
-    WhirlWarp(worldXZ, wSamp, wJ, wRot, wBlend);
+    float wBlend, wCalm;
+    WhirlWarp(worldXZ, wSamp, wJ, wRot, wBlend, wCalm);
 
     float3 lods = float3(
         CascadeLod(dist, gCascade0.x),
@@ -81,13 +82,24 @@ VSOut VSOcean(VSIn v)
     }
     [branch] if (wBlend > 0.001)
     {
-        float3 fw = WhirlDetailFades(fades, wJ);
+        // A vertex step strides `st` times further through the map than through
+        // the world, so sample the level whose texel pitch matches that - the
+        // vertex-shader counterpart of the pixel shader's anisotropic filter -
+        // and fade what the core's strain has destroyed.
+        float st = WhirlStretch(wJ);
+        float lodBias = log2(max(st, 1.0));
+        float3 fw = WhirlDetailFades(fades, st, wCalm);
         float3 dw = 0;
-        dw += fw.x * tDisp0.SampleLevel(samLinearWrap, wSamp * gCascade0.x, lods.x).xyz;
-        dw += fw.y * tDisp1.SampleLevel(samLinearWrap, wSamp * gCascade1.x, lods.y).xyz;
-        dw += fw.z * tDisp2.SampleLevel(samLinearWrap, wSamp * gCascade2.x, lods.z).xyz;
+        dw += fw.x * tDisp0.SampleLevel(samLinearWrap, wSamp * gCascade0.x, lods.x + lodBias).xyz;
+        dw += fw.y * tDisp1.SampleLevel(samLinearWrap, wSamp * gCascade1.x, lods.y + lodBias).xyz;
+        dw += fw.z * tDisp2.SampleLevel(samLinearWrap, wSamp * gCascade2.x, lods.z + lodBias).xyz;
         // rotate the sampled choppy vector into the wound pattern's frame
         dw.xz = float2(wRot.x * dw.x - wRot.y * dw.z, wRot.y * dw.x + wRot.x * dw.z);
+        // Across the compressed axis a particle displacement is carried by
+        // J^-1, so it shrinks by 1/stretch. Without this the wound chop keeps
+        // its map-space size while the grid around it is squeezed, and the
+        // surface folds over itself into the jagged rim.
+        dw.xz *= saturate(WHIRL_CHOP_KNEE / st);
         disp += wBlend * dw;
     }
     disp.xz *= gLambda;
@@ -99,7 +111,7 @@ VSOut VSOcean(VSIn v)
     ImpactWaves(worldXZ, impDisp, impSlope, impFoam);
     disp += impDisp;
 
-    // Whirlpool funnel, spiral ripples and collapse rings.
+    // Whirlpool funnel, foam and collapse rings.
     float3 whDisp;
     float2 whSlope;
     float whFoam;
@@ -110,6 +122,7 @@ VSOut VSOcean(VSIn v)
     o.pos = mul(float4(rel, 1.0), gViewProj);
     o.rel = rel;
     o.worldXZ = worldXZ + disp.xz;
+    o.gridXZ = worldXZ;   // the parameter the whirl terms were evaluated at
     o.fades = fades;
     o.dispY = disp.y;
     return o;
@@ -122,12 +135,15 @@ float4 PSOcean(VSOut i) : SV_Target
     float3 V = -E;
 
     // Whirlpool warp (must match VSOcean): sampled slopes come back through
-    // the Jacobian so lighting agrees with the wound displacement field.
+    // the Jacobian so lighting agrees with the wound displacement field. It is
+    // evaluated at the UNDISPLACED grid position, exactly as the vertex shader
+    // did - feeding it the displaced position instead made the shading solve a
+    // different vortex than the geometry, which is what tore the throat rim.
     float2 wSamp;
     float4 wJ;
     float2 wRot;
-    float wBlend;
-    WhirlWarp(i.worldXZ, wSamp, wJ, wRot, wBlend);
+    float wBlend, wCalm;
+    WhirlWarp(i.gridXZ, wSamp, wJ, wRot, wBlend, wCalm);
 
     // --- Normal from analytic derivatives, cascade-faded ---
     // The maps are mip-chained and sampled anisotropically: each pixel gets
@@ -155,19 +171,26 @@ float4 PSOcean(VSOut i) : SV_Target
     }
     [branch] if (wBlend > 0.001)
     {
-        float3 fw = WhirlDetailFades(i.fades, wJ);
+        float stP = WhirlStretch(wJ);
+        float chopF = saturate(WHIRL_CHOP_KNEE / stP);   // the VS scaled the wound chop by this
+        float3 fw = WhirlDetailFades(i.fades, stP, wCalm);
         float4 d0 = tDeriv0.Sample(samAnisoWrap, wSamp * gCascade0.x);
         float4 d1 = tDeriv1.Sample(samAnisoWrap, wSamp * gCascade1.x);
         float4 d2 = tDeriv2.Sample(samAnisoWrap, wSamp * gCascade2.x);
         float m0 = tDisp0.Sample(samAnisoWrap, wSamp * gCascade0.x).w;
         float m1 = tDisp1.Sample(samAnisoWrap, wSamp * gCascade1.x).w;
         float m2 = tDisp2.Sample(samAnisoWrap, wSamp * gCascade2.x).w;
-        sigma2 += wBlend * (fw.x * fw.x * max(0.0, m0 - 0.5 * dot(d0.xy, d0.xy))
-                          + fw.y * fw.y * max(0.0, m1 - 0.5 * dot(d1.xy, d1.xy))
-                          + fw.z * fw.z * max(0.0, m2 - 0.5 * dot(d2.xy, d2.xy)));
+        // The variance filtered out in map space transforms through J too: for
+        // isotropic sigma^2, E|J^T s|^2 = sigma^2 * tr(J^T J) / 2. So detail the
+        // warp stretched past the pixel footprint widens the highlight instead
+        // of sparkling in it.
+        float jvar = 0.5 * dot(wJ, wJ);
+        sigma2 += wBlend * jvar * (fw.x * fw.x * max(0.0, m0 - 0.5 * dot(d0.xy, d0.xy))
+                                 + fw.y * fw.y * max(0.0, m1 - 0.5 * dot(d1.xy, d1.xy))
+                                 + fw.z * fw.z * max(0.0, m2 - 0.5 * dot(d2.xy, d2.xy)));
         float4 d = d0 * fw.x + d1 * fw.y + d2 * fw.z;
-        float2 sw = float2(d.x / max(1.0 + gLambda * d.z, 0.15),
-                           d.y / max(1.0 + gLambda * d.w, 0.15));
+        float2 sw = float2(d.x / max(1.0 + gLambda * chopF * d.z, 0.15),
+                           d.y / max(1.0 + gLambda * chopF * d.w, 0.15));
         // slope_world = J^T * slope_sampled
         slope += wBlend * float2(wJ.x * sw.x + wJ.z * sw.y,
                                  wJ.y * sw.x + wJ.w * sw.y);
@@ -180,11 +203,11 @@ float4 PSOcean(VSOut i) : SV_Target
     ImpactWaves(i.worldXZ, impDisp, impSlope, impFoam);
     slope += impSlope;
 
-    // Whirlpool funnel, spiral ripples and collapse rings.
+    // Whirlpool funnel, foam and collapse rings.
     float3 whDisp;
     float2 whSlope;
     float whFoam;
-    WhirlWaves(i.worldXZ, whDisp, whSlope, whFoam);
+    WhirlWaves(i.gridXZ, whDisp, whSlope, whFoam);
     slope += whSlope;
 
     // Screen-space slope derivatives catch whatever residual detail even the
@@ -207,7 +230,9 @@ float4 PSOcean(VSOut i) : SV_Target
     float2 foamXZ = lerp(i.worldXZ, wSamp, wBlend);
     float foamAcc = tFoam0.Sample(samAnisoWrap, foamXZ * gCascade0.x) * i.fades.x
                   + tFoam1.Sample(samAnisoWrap, foamXZ * gCascade1.x) * i.fades.y * 0.75;
-    float foamTexture = Fbm(foamXZ * 0.9 + float2(0.07, 0.05) * gTime, 3);
+    // Never sample the break-up through the warp: it is mip-less, so the
+    // vortex's own compression would grind it into per-pixel grain.
+    float foamTexture = Fbm(i.worldXZ * 0.9 + float2(0.07, 0.05) * gTime, 3);
     // The procedural break-up has no mip chain: ease it toward its mean at
     // range so it doesn't reintroduce the speckle the filtered maps removed.
     foamTexture = lerp(foamTexture, 0.55, saturate(dist / 900.0));
@@ -218,7 +243,8 @@ float4 PSOcean(VSOut i) : SV_Target
     float coverage = foamAcc * gFoamAmount * (0.30 + 0.85 * foamTexture);
     float foam = saturate((coverage - 0.32) * 2.4);
     foam = foam * foam * (3.0 - 2.0 * foam);
-    foam = saturate(foam + (impFoam + whFoam) * (0.4 + 0.6 * foamTexture));
+    foam = saturate(foam + impFoam * (0.4 + 0.6 * foamTexture)
+                         + whFoam * (0.6 + 0.4 * foamTexture)); // whirl foam carries its own break-up
 
     // --- Roughness: base + fading detail cascades add variance + foam ---
     float detailLoss = (1.0 - i.fades.y) * gCascade1.z + (1.0 - i.fades.z) * gCascade2.z;

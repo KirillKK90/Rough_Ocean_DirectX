@@ -175,9 +175,10 @@ void ImpactWaves(float2 worldXZ, out float3 disp, out float2 slope, out float fo
 // integrated depression is closely approximated by the hyperbolic funnel
 //   h(r) = -D / (1 + r^2/rc^2),   D = Gamma^2 / (8 pi^2 g rc^2)
 // (the exact 1/r^2 far-field of the Lamb-Oseen dip, parabolic in the core).
-// The circulation ramps linearly while the "plug is pulled" (the spin-up
-// time), then decays exponentially while the core spreads diffusively, so the
-// funnel deepens and widens, then swiftly relaxes away.
+// The circulation ramps as a smoothstep while the "plug is pulled" (the
+// spin-up time), then decays as sech(t/tau) while the core spreads, so the
+// funnel deepens and widens, then relaxes away at a gravity-consistent rate.
+// Both profiles are C1 at the junction, so nothing in the shape snaps.
 //
 // The surrounding sea is drawn in by warping the FFT-cascade sampling with
 // the vortex's own particle map: features wind by the integrated rotation
@@ -187,14 +188,15 @@ void ImpactWaves(float2 worldXZ, out float3 disp, out float2 slope, out float fo
 // so the ambient ripples themselves spiral into the drain. Sampled slopes
 // are pulled back through the exact warp Jacobian. When the vortex dies the
 // wound pattern crossfades back to the undisturbed sea (dispersive mixing)
-// and the rebounding dimple radiates a small Cauchy-Poisson ring packet.
+// and the relaxing dimple overshoots into a low boil dome that radiates a
+// gentle Cauchy-Poisson ring packet.
 // Keep the height terms in sync with Whirlpool.cpp (CPU mirror for buoy).
 //
 // Several whirlpools can be live at once. Each one's particle map is a
 // diffeomorphism, so they compose: the sample position is passed through each
 // vortex in turn and the Jacobians multiply by the chain rule (water wound by
-// one vortex and then pulled by the next). The surface fields - funnel,
-// spiral arms, rebound rings, foam - superpose linearly on top.
+// one vortex and then pulled by the next). The surface fields - funnel, foam
+// streaks and rim, boil dome and rebound rings - superpose linearly on top.
 //
 // Everything that shapes a vortex is a per-event runtime parameter (UI
 // sliders -> gWhirl/gWhirl2/gWhirl3), captured when it spawns:
@@ -212,11 +214,37 @@ static const float WHIRL_BETA = 1.2564312;   // Lamb-Oseen peak-velocity constan
 static const float WHIRL_WIND_KNEE = 12.566; // 2 turns: winding is exact below this
 static const float WHIRL_WIND_MAX = 37.699;  // 6 turns: saturated core plateau
 static const float WHIRL_WIND_PER_M = 6.6;   // resolvable winding per metre of core
-static const float WHIRL_STRETCH_KNEE = 12.0; // map stretch the cascades can still carry
 static const float WHIRL_SINK_MAX = 2.5;     // largest draw-in radius, in core radii
-static const float WHIRL_ARM_K = 14.8;       // spiral-arm wavenumber * core radius
-static const float WHIRL_ARM_FOAM = 68.4;    // arm-streak foam threshold * core radius
 static const float WHIRL_HOLE_R = 0.12;      // drain mouth radius, in core radii
+// Wound-sea detail budget. A vortex core both stretches the map and destroys
+// short waves; past a couple of texels of stretch the fine bands cannot be
+// carried anyway, so they are faded out rather than amplified into striations.
+static const float WHIRL_STRETCH_KNEE  = 2.0; // stretch above which the wound wind-sea fades
+static const float WHIRL_STRETCH_KNEE0 = 4.0; // bound on the wound swell's slope gain
+static const float WHIRL_CHOP_KNEE     = 1.5; // stretch beyond which wound chop is scaled down
+static const float WHIRL_CALM_R        = 2.0; // strain-calmed core: 1/e radius, in core radii
+static const float WHIRL_THROAT_DARK   = 0.35; // unlit-water darkening down the throat
+// Foam: bubbles are material, so it is drawn as a couple of streak lines that
+// ride with the water plus a broken rim where the inflow breaks over the wall.
+static const float WHIRL_STREAK_N    = 2.0;   // foam streaks per vortex
+static const float WHIRL_STREAK_W    = 0.14;  // streak 1/e half-width, in core radii
+static const float WHIRL_STREAK_PX   = 0.006; // + per metre of view distance (stays pixel-visible)
+static const float WHIRL_STREAK_FOAM = 0.6;
+static const float WHIRL_RIM_R       = 1.05;  // breaking-rim band centre, in core radii
+static const float WHIRL_RIM_W       = 0.30;  // rim band 1/e half-width, in core radii
+static const float WHIRL_RIM_FOAM    = 0.45;
+static const float WHIRL_FOAM_GATE   = 0.20;  // wall slope below which no foam forms
+static const float WHIRL_FOAM_LINGER = 1.5;   // foam persistence after the churn stops, in tau
+// Collapse. Height terms are mirrored in Whirlpool.cpp (CPU, for the buoy).
+static const float WHIRL_BOIL_AMP  = 0.12; // upwelling boil dome height, in peak depths
+static const float WHIRL_BOIL_T    = 1.0;  // dome rise time, in decay times
+static const float WHIRL_BOIL_R    = 1.5;  // dome Gaussian radius^2, in rcR^2
+static const float WHIRL_REB_R     = 1.2;  // rebound length scale, in PEAK core radii (frozen)
+static const float WHIRL_REB_R0    = 0.6;  // packet soft-core radius, in rcR
+static const float WHIRL_REB_LAM   = 3.0;  // packet dominant wavelength, in rcR
+static const float WHIRL_REB_AMP   = 0.15; // packet amplitude, in peak depths
+static const float WHIRL_REB_TAU   = 6.0;  // packet temporal decay, s
+static const float WHIRL_REB_DELAY = 1.0;  // packet release after the plug, in decay times
 
 // Smooth saturating limiter: exactly the identity for |x| <= knee, asymptotes
 // to +-lim beyond it. Also returns dy/dx so warped gradients stay exact.
@@ -240,6 +268,12 @@ void WhirlSoftLimit(float x, float knee, float lim, out float y, out float dydx)
 // >= 0; the spin direction rides on the sign of the gain), and the
 // warped-vs-plain sea blend weight (1 = fully wound, -> 0 as the pattern
 // dissolves after the vortex dies).
+//
+// The torque ramps as a smoothstep and releases as sech(t/tau); both are C1
+// at the junction (sech'(0) = 0), so the funnel never snaps between phases -
+// a kink there reads as a glitch rather than as water. S keeps a closed form
+// in both phases (the decay integral is the Gudermannian), so the wound
+// pattern stays exactly consistent with the circulation that wound it.
 void WhirlEnvelope(int i, float age, out float rc, out float D, out float S, out float wBlend)
 {
     float depthPeak = gWhirl[i].w;
@@ -249,19 +283,23 @@ void WhirlEnvelope(int i, float age, out float rc, out float D, out float S, out
     if (age <= grow)
     {
         float u = age / grow;
-        gam = gmax * u;                    // linear torque ramp
-        S = 0.5 * gmax * grow * u * u;
-        rc = rcPeak * (0.35 + 0.65 * u);
+        float sm = u * u * (3.0 - 2.0 * u);                   // smooth torque ramp
+        gam = gmax * sm;
+        S = gmax * grow * (u * u * u - 0.5 * u * u * u * u);  // int gmax*sm dt; 0.5*gmax*grow at u = 1
+        rc = rcPeak * (0.6 + 0.4 * sm);                       // born wide: no centimetre-scale stage
         wBlend = 1.0;
     }
     else
     {
         float d = age - grow;
-        float e = exp(-d / tau);
-        gam = gmax * e;
-        S = gmax * (0.5 * grow + tau * (1.0 - e));
-        rc = rcPeak * (1.0 + 0.5 * (1.0 - exp(-d / (1.6 * tau)))); // diffusive spread
-        wBlend = exp(-d / gWhirl3[i].w);
+        float x = d / tau;
+        float ex = exp(-x);
+        float sech = 2.0 * ex / (1.0 + ex * ex);              // overflow-free 1/cosh
+        gam = gmax * sech;
+        S = gmax * (0.5 * grow + tau * 2.0 * atan(tanh(0.5 * x))); // Gudermannian
+        rc = rcPeak * (1.0 + 0.5 * (1.0 - sech));             // diffusive spread, C1 at d = 0
+        float y = d / gWhirl3[i].w;
+        wBlend = exp(-y * y);   // holds while it still spins, then dissolves decisively
     }
     D = gam * gam / (8.0 * PI * PI * WHIRL_G * rc * rc);
 }
@@ -294,19 +332,34 @@ void WhirlWinding(int i, float r, float rc, float S, out float Th, out float Thp
     Thp = dydx * rawp;
 }
 
-// Detail attenuation for the warped sea. Where the vortex map stretches a
-// step far enough that the fine ripples would be sampled below their own
-// texel rate, they are faded out rather than aliased into terracing - which
-// is also what turbulence does to ripples wound past the point of
-// recognition. (The cascade maps carry mip chains now, but the vertex path
-// samples explicit levels, and the fade doubles as the physical churn look.)
-// The knee sits above the stretch a default whirlpool reaches, so it only
-// engages on strong settings.
-float3 WhirlDetailFades(float3 fades, float4 J)
+// Largest singular value of the warp Jacobian: the factor by which the map
+// stretches a step in its worst direction. Rotation-invariant (the row-norm
+// it replaces under-read this by up to 26% when the warp carried an azimuthal
+// wobble) and exactly 1 for the identity, so an unwarped sample is untouched.
+float WhirlStretch(float4 J)
 {
-    float stretch = max(length(J.xy), length(J.zw));
-    float det = saturate(WHIRL_STRETCH_KNEE / max(stretch, 1e-3));
-    return float3(fades.x, fades.y * lerp(1.0, det, 0.6), fades.z * det);
+    float fro = dot(J, J);              // s1^2 + s2^2
+    float dt = J.x * J.w - J.y * J.z;   // s1 * s2
+    float disc = sqrt(max(fro * fro - 4.0 * dt * dt, 0.0));
+    return sqrt(0.5 * (fro + disc));
+}
+
+// Detail budget for the warped sea. Two things remove the short waves inside
+// a vortex, and both are physical: the strain of the core tears them apart,
+// and a map step stretched past a couple of texels cannot carry them anyway -
+// left in, they come back as slopes multiplied by the same stretch, which is
+// exactly the fine concentric striation that made the old vortex read as
+// noise. So the wound swell's slope gain is bounded and the fine bands are
+// faded by stretch and by the strain-calm weight. This engages inside roughly
+// three core radii for every preset, by design; it is exactly (fades) where
+// stretch <= the knee and calm == 0, i.e. wherever no vortex is live.
+float3 WhirlDetailFades(float3 fades, float stretch, float calm)
+{
+    float det  = saturate(WHIRL_STRETCH_KNEE  / max(stretch, 1e-3));
+    float det0 = saturate(WHIRL_STRETCH_KNEE0 / max(stretch, 1e-3));
+    return float3(fades.x * det0 * (1.0 - 0.35 * calm),
+                  fades.y * det * (1.0 - 0.8 * calm),
+                  fades.z * det * det * (1.0 - calm));
 }
 
 // One vortex's particle-map warp of the ambient-sea sampling. Returns the
@@ -314,12 +367,13 @@ float3 WhirlDetailFades(float3 fades, float4 J)
 // the pattern rotation angle, and this vortex's warped-vs-plain blend weight.
 // False means it contributes nothing here (inactive, or out of range).
 bool WhirlWarpOne(int i, float2 p, out float2 samp, out float4 J, out float th,
-                  out float wBlend)
+                  out float wBlend, out float calm)
 {
     samp = p;
     J = float4(1, 0, 0, 1);
     th = 0.0;
     wBlend = 0.0;
+    calm = 0.0;
 
     float age = gWhirl[i].z;
     if (age <= 0.0 || gWhirl[i].w <= 0.0)
@@ -345,6 +399,14 @@ bool WhirlWarpOne(int i, float2 p, out float2 samp, out float4 J, out float th,
     float fadeR = gWhirl3[i].y;
     float rc2 = rc * rc;
     float eta = r * r / rc2;
+
+    // Strain-calm weight: the shear and convergence of the core flatten the
+    // short waves it drags in. spin = sqrt(D/depthPeak) * rc/rcPeak is
+    // identically Gamma/Gamma_max (since D = Gamma^2 / (8 pi^2 g rc^2)), so a
+    // vortex that has spun down calms nothing and the sea comes back by itself.
+    float spin = sqrt(saturate(D / max(gWhirl[i].w, 1e-3))) * rc / gWhirl2[i].z;
+    calm = spin * exp(-eta / (WHIRL_CALM_R * WHIRL_CALM_R));
+
     float en = exp(-eta);
     float f = exp(-(r * r) / (fadeR * fadeR));
     float fp = -2.0 * r / (fadeR * fadeR) * f;
@@ -383,19 +445,20 @@ bool WhirlWarpOne(int i, float2 p, out float2 samp, out float4 J, out float th,
 // A vortex fully dissolves back to plain sea only where no live one overlaps
 // it - which the per-vortex cull radius already decides.
 void WhirlWarp(float2 worldXZ, out float2 samp, out float4 J, out float2 rotCS,
-               out float wBlend)
+               out float wBlend, out float calm)
 {
     samp = worldXZ;
     J = float4(1, 0, 0, 1);
     float thTotal = 0.0;
     float plainWeight = 1.0;
+    float calmAcc = 1.0;
 
     for (int i = 0; i < WHIRL_MAX; ++i)
     {
         float2 p;
         float4 Ji;
-        float th, wb;
-        [branch] if (!WhirlWarpOne(i, samp, p, Ji, th, wb))
+        float th, wb, ci;
+        [branch] if (!WhirlWarpOne(i, samp, p, Ji, th, wb, ci))
             continue;
         samp = p;
         // J = Ji * J (2x2, row-major in xyzw)
@@ -403,16 +466,44 @@ void WhirlWarp(float2 worldXZ, out float2 samp, out float4 J, out float2 rotCS,
                    Ji.z * J.x + Ji.w * J.z, Ji.z * J.y + Ji.w * J.w);
         thTotal += th;
         plainWeight *= 1.0 - wb;
+        calmAcc *= 1.0 - ci;
     }
 
     float s, c;
     sincos(thTotal, s, c);
     rotCS = float2(c, s); // world vector = R(+total) * sampled vector
     wBlend = 1.0 - plainWeight;
+    calm = 1.0 - calmAcc;  // overlapping cores calm cumulatively
 }
 
-// One whirlpool's own surface: funnel depression, wound spiral ripple arms,
-// churned foam collar, and the ring packet radiated by the collapse rebound.
+// Value noise periodic in x with integer period px, for break-up patterns
+// drawn in the material angle (x = psi * px / 2pi). atan2 puts a branch cut
+// at +-pi, so an ordinary noise would leave a visible seam along that ray;
+// wrapping the lattice makes the pattern continuous around the circle.
+float WhirlNoisePX(float2 p, float px)
+{
+    float2 ip = floor(p);
+    float2 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float x0 = ip.x - px * floor(ip.x / px);
+    float x1 = (x0 + 1.0 < px) ? x0 + 1.0 : 0.0;
+    float a = Hash12(float2(x0, ip.y));
+    float b = Hash12(float2(x1, ip.y));
+    float c = Hash12(float2(x0, ip.y + 1.0));
+    float d = Hash12(float2(x1, ip.y + 1.0));
+    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+// One whirlpool's own surface: the funnel depression, material-line foam (a
+// couple of streaks plus a broken rim) and the collapse boil dome + ring
+// packet. Height terms are mirrored in Whirlpool::HeightAt (CPU, for the buoy).
+//
+// What is deliberately absent: the old spiral "ripple arms". Their radial
+// wavenumber was karm - 3*Theta'(r), and since Theta' < 0 the winding ADDED
+// to it, so three arms meant to sweep outward collapsed into a metre-pitch
+// concentric grating - a dozen near-circular grooves the mesh could not
+// resolve and the eye read as noise. A real drain has no such corrugation:
+// the wall is glassy and the only fine structure is where bubbles ride.
 void WhirlWavesOne(int i, float2 worldXZ, inout float3 disp, inout float2 slope,
                    inout float foam)
 {
@@ -424,6 +515,8 @@ void WhirlWavesOne(int i, float2 worldXZ, inout float3 disp, inout float2 slope,
     if (r > gWhirl3[i].z)
         return;
     float2 u = dv / r;
+    float depthPeak = gWhirl[i].w;
+    float grow = gWhirl2[i].x, tau = gWhirl2[i].y, rcPeak = gWhirl2[i].z;
 
     float rc, D, S, wb;
     WhirlEnvelope(i, age, rc, D, S, wb);
@@ -432,7 +525,7 @@ void WhirlWavesOne(int i, float2 worldXZ, inout float3 disp, inout float2 slope,
 
     // --- Funnel: cyclostrophic free-surface depression ---
     float inv = 1.0 / (1.0 + eta);
-    float ddr = D * (2.0 * r / rc2) * inv * inv; // wall slope d(-h)/dr, > 0
+    float ddr = D * (2.0 * r / rc2) * inv * inv; // dh/dr in the grid parameter, > 0
     disp.y += -D * inv;
     // Slight inward pull sharpens the throat. Its radial gradient at the
     // centre is pull * 2D/rc, so a steep funnel would bunch (and past 1,
@@ -440,56 +533,94 @@ void WhirlWavesOne(int i, float2 worldXZ, inout float3 disp, inout float2 slope,
     // to a fixed compression; the default sits under the cap untouched.
     float pull = min(0.35, 0.3 * rc / max(D, 1e-3));
     disp.xz += -u * ddr * rc * pull;
-    slope += u * ddr;
+    // That pull also compresses the grid radially by dr'/dr = 1 - cP, so the
+    // lit (world-space) slope is the parameter slope divided by it. Without
+    // this the shading disagrees with the geometry exactly where the wall is
+    // steepest, which is what made the throat rim look torn.
+    float cP = pull * (2.0 * D / rc) * inv * inv * inv * (1.0 - 3.0 * eta);
+    slope += u * ddr / max(1.0 - cP, 0.15);
 
-    // Churned white collar where the wall is steep, thinning toward the
-    // throat so the drain keeps a glassy dark eye.
-    float collar = saturate((ddr - 0.28) * 2.8);
-    collar *= 1.0 - 0.85 * exp(-eta / 0.10);
-    foam += collar * 0.85;
-
-    // --- Spiral ripple arms: short waves wound by the differential rotation,
-    // sharing Theta with the warp so they stay in phase with the dragged sea.
-    float Th, Thp;
-    WhirlWinding(i, r, rc, S, Th, Thp);
-    // Arm wavelength and height scale with the core, so a wide maelstrom gets
-    // long sweeping arms rather than the same centimetre ripples as a small one.
-    float theta = atan2(dv.y, dv.x);
-    float karm = WHIRL_ARM_K / rc;
-    float armBand = (r - 1.45 * rc) / (2.4 * rc);
-    float armEnv = exp(-armBand * armBand) * (1.0 - exp(-1.5 * eta));
-    float aA = min(0.03 * D, 0.012 * rc) * armEnv;
-    [branch] if (aA > 1e-4)
+    // --- Foam. Bubbles are material: they ride the water rather than sitting
+    // still in space, so the foam is drawn along lines of constant material
+    // angle psi = theta - Theta(r) - exactly the lines the warp winds, so the
+    // streaks shear and rotate with the sea they float on. A broken rim marks
+    // where the inflow breaks over the wall. Gated by wall steepness (a lazy
+    // drain makes no bubbles) and lingering briefly after the churn stops.
+    // Pixel-only: foam adds no height, so it can never alias the geometry.
+    float d = age - grow;
+    // 0.6495 = max of 2t/(1+t^2)^2, i.e. the peak wall slope in units of D/rc.
+    float gateNow = saturate((0.6495 * D / rc - WHIRL_FOAM_GATE) * 6.0);
+    float gatePk = saturate((0.6495 * depthPeak / rcPeak - WHIRL_FOAM_GATE) * 6.0);
+    float linger = (d > 0.0) ? gatePk * exp(-d / (WHIRL_FOAM_LINGER * tau)) : 0.0;
+    float foamK = max(gateNow, linger);
+    [branch] if (foamK > 1e-3 && r < 6.0 * rc)
     {
-        float phi = 3.0 * (theta - Th) + karm * r;
-        float sph, cph;
-        sincos(phi, sph, cph);
-        float2 that = float2(-u.y, u.x);
-        float2 gphi = (karm - 3.0 * Thp) * u + (3.0 / r) * that;
-        disp.y += aA * cph;
-        slope += (-aA * sph) * gphi;
-        foam += saturate(aA * (WHIRL_ARM_FOAM / rc) - 0.25) * (0.5 + 0.5 * cph);
+        float Th, Thp;
+        WhirlWinding(i, r, rc, S, Th, Thp);
+        float theta = atan2(dv.y, dv.x);
+        float psi = theta - Th - 2.1 * float(i);   // material angle, offset per vortex
+        float lnr = log(r / rc);
+        // Break-up drawn in material coordinates, periodic in psi so the
+        // atan2 branch cut leaves no seam.
+        float2 sc = float2(psi * (8.0 / (2.0 * PI)), 1.8 * lnr + 0.08 * age + 7.3 * float(i));
+        float nS = 0.65 * WhirlNoisePX(sc, 8.0) + 0.35 * WhirlNoisePX(sc * 2.0 + 3.1, 16.0);
+        float nR = 0.65 * WhirlNoisePX(sc + float2(2.5, 3.7), 8.0) + 0.35 * WhirlNoisePX(sc * 2.0 + 9.4, 16.0);
+
+        // Streaks: Gaussian in the perpendicular distance to the nearest
+        // material line. |grad psi| converts an angle offset into metres, so
+        // the lines keep a real width as they wind in toward the throat.
+        float dpsi = (frac(psi * WHIRL_STREAK_N / (2.0 * PI) + 0.5) - 0.5) * (2.0 * PI / WHIRL_STREAK_N);
+        float gpsi = sqrt(Thp * Thp + 1.0 / (r * r));
+        float spacing = 2.0 * PI / (WHIRL_STREAK_N * gpsi);
+        float W = min(WHIRL_STREAK_W * rc * sqrt(max(1.0, r / (1.5 * rc)))
+                      + WHIRL_STREAK_PX * length(worldXZ - gCamPos.xz), 0.25 * spacing);
+        float dperp = dpsi / gpsi;
+        float streak = exp(-dperp * dperp / (W * W));
+        float segs = smoothstep(0.30, 0.65, nS);          // broken into lit segments
+        float sEnv = smoothstep(0.30 * rc, 0.65 * rc, r)  // glassy eye
+                   * exp(-(lnr - 0.3) * (lnr - 0.3) / 0.81)
+                   * saturate(2.0 - r / (3.0 * rc));      // clean cut-off inside the 6 rc branch
+
+        float xr = (r / rc - WHIRL_RIM_R) / WHIRL_RIM_W;
+        float rim = exp(-xr * xr) * (0.3 + 0.7 * smoothstep(0.3, 0.7, nR));
+
+        foam += foamK * (WHIRL_STREAK_FOAM * streak * segs * sEnv + WHIRL_RIM_FOAM * rim);
     }
 
-    // --- Collapse rebound: when the forcing stops, the recovering dimple
-    // radiates a gentle dispersive ring packet (Cauchy-Poisson, like a small
-    // inverted impact).
-    float dAge = age - gWhirl2[i].x;
-    [branch] if (dAge > 0.05)
+    // --- Collapse: the relaxing depression does not simply flatten, it
+    // overshoots. The column of water that was held down rises into a low
+    // upwelling boil which then radiates a gentle Cauchy-Poisson ring packet.
+    // The packet's scale radius is frozen to the PEAK core, so its wavelength
+    // cannot drift as rc spreads; the soft core is C1, so the centre has no
+    // kink; and nothing here is steep enough to make foam.
+    [branch] if (d > 0.0)
     {
-        float rr = max(r, 0.6 * rc);
-        float kloc = WHIRL_G * dAge * dAge / (4.0 * rr * rr);
-        float phase = -WHIRL_G * dAge * dAge / (4.0 * rr);
-        float k0 = 2.0 * PI / (2.5 * rc);
-        float lx = log(max(kloc / k0, 1e-6));
-        float envr = exp(-lx * lx * 1.4);
-        float Ar = 0.32 * gWhirl[i].w * pow(rc / (rc + r), 0.8) * exp(-dAge / 4.5) * envr;
-        float sr, cr;
-        sincos(phase, sr, cr);
-        disp.y += Ar * cr;
-        float detadr = -Ar * kloc * sr;
-        slope += u * detadr;
-        foam += saturate((abs(detadr) - 0.06) * 5.0) * saturate(1.2 - r / (18.0 * rc));
+        float rcR = WHIRL_REB_R * rcPeak;
+        float etaR = r * r / (rcR * rcR);
+        float x = d / (WHIRL_BOIL_T * tau);
+        float xe = x * x * exp(2.0 * (1.0 - x));   // 0 -> 1 at x = 1 -> 0
+        float B = WHIRL_BOIL_AMP * depthPeak * xe;
+        float dome = exp(-etaR / WHIRL_BOIL_R);
+        disp.y += B * dome;
+        slope += u * (-B * dome * 2.0 * r / (WHIRL_BOIL_R * rcR * rcR));
+
+        float dR = d - WHIRL_REB_DELAY * tau;
+        [branch] if (dR > 0.05)
+        {
+            float r0 = WHIRL_REB_R0 * rcR;
+            float rr = sqrt(r * r + r0 * r0);      // C1 soft core (no plateau)
+            float kloc = WHIRL_G * dR * dR / (4.0 * rr * rr);
+            float k0 = 2.0 * PI / (WHIRL_REB_LAM * rcR);
+            float phase = -WHIRL_G * dR * dR / (4.0 * rr) + k0 * r0;
+            float lx = log(max(kloc / k0, 1e-6));
+            float envr = exp(-lx * lx * 1.4);
+            float Ar = WHIRL_REB_AMP * depthPeak * sqrt(rcR / (rcR + r)) * exp(-dR / WHIRL_REB_TAU) * envr;
+            float sr, cr;
+            sincos(phase, sr, cr);
+            disp.y += Ar * cr;
+            // exact d(phase)/dr through the soft core: vanishes at r = 0
+            slope += u * (-Ar * kloc * sr * (r / rr));
+        }
     }
 }
 
@@ -508,24 +639,30 @@ float WhirlDrainDarkness(float2 worldXZ)
         float age = gWhirl[i].z;
         [branch] if (age <= 0.0 || gWhirl[i].w <= 0.0)
             continue;
-        // Conservative reject before any envelope work: the core can only
-        // spread to 1.5x its peak radius and `open` never exceeds 1, so this
-        // bounds the lit region without changing a pixel of the result.
+        // Conservative reject before any envelope work: the throat shading
+        // reaches at most the spread core radius, 1.5x the peak.
         float2 d = worldXZ - gWhirl[i].xy;
         float r = length(d);
-        if (r > WHIRL_HOLE_R * 1.5 * gWhirl2[i].z * 2.8)
+        if (r > 1.5 * gWhirl2[i].z)
             continue;
 
         float rc, D, S, wb;
         WhirlEnvelope(i, age, rc, D, S, wb);
         float open = saturate(D / max(gWhirl[i].w, 1e-3)); // 0 at spawn -> 1 at full spin-up
+        // Deep, unlit water down the throat: a soft gradient from ~0.7 rc into
+        // the mouth, so the eye reads as the bottom of a dark bowl rather than
+        // a black dot pasted on lit water.
+        float eta = r * r / (rc * rc);
+        float throat = open * exp(-eta / 0.30) * (1.0 - smoothstep(0.7 * rc, rc, r));
+        float dk = WHIRL_THROAT_DARK * throat;
         float holeR = WHIRL_HOLE_R * rc * open;
-        [branch] if (holeR < 1e-3 || r > holeR * 2.8)
-            continue;
-
-        float core = 1.0 - smoothstep(holeR * 0.75, holeR * 1.05, r); // pure black
-        float shaft = 1.0 - smoothstep(holeR, holeR * 2.8, r);        // its shadowed lip
-        dark = max(dark, max(core, 0.7 * shaft));
+        [branch] if (holeR >= 1e-3 && r <= holeR * 2.8)
+        {
+            float core = 1.0 - smoothstep(holeR * 0.75, holeR * 1.05, r); // pure black
+            float shaft = 1.0 - smoothstep(holeR, holeR * 2.8, r);        // its shadowed lip
+            dk = max(dk, max(core, 0.7 * shaft));
+        }
+        dark = max(dark, dk);
     }
     return saturate(dark);
 }
@@ -540,6 +677,7 @@ void WhirlWaves(float2 worldXZ, out float3 disp, out float2 slope, out float foa
     foam = 0;
     for (int i = 0; i < WHIRL_MAX; ++i)
         WhirlWavesOne(i, worldXZ, disp, slope, foam);
+    foam = min(foam, 0.85); // rim + streaks (+ a neighbour) never reach solid white
 }
 
 // Fullscreen triangle.
