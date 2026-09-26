@@ -123,8 +123,8 @@ state).
 | LOD | FFT size | Cascades | Mesh (sectors×rings) | Sky cube | Measured on Iris Xe, 1600×900 |
 |-----|----------|----------|----------------------|----------|-------------------------------|
 | Low | 128² | 2 | 256×160 | 64 | ~650 FPS |
-| Medium (default) | 256² | 3 | 384×224 | 128 | ~390 FPS |
-| High | 256² | 3 | 512×288 | 128 | ~330 FPS |
+| Medium | 256² | 3 | 384×224 | 128 | ~390 FPS |
+| High (default) | 256² | 3 | 512×288 | 128 | ~330 FPS |
 | Ultra | 512² | 3 | 640×352 | 256 | ~170 FPS |
 
 All levels are far above the 25–30 FPS target on an integrated Intel Iris Xe
@@ -134,7 +134,7 @@ All levels are far above the 25–30 FPS target on an integrated Intel Iris Xe
 
 ```
 --w N --h N        window size (default 1600x900)
---lod 0..3         level of detail (default 1 = Medium)
+--lod 0..3         level of detail (default 2 = High)
 --sea 0..9         sea state (default 4)
 --time 0..6        time of day (default 4 = evening)
 --frames N         benchmark: render N frames, print average FPS, exit

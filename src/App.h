@@ -16,7 +16,7 @@
 struct LaunchOptions
 {
     uint32_t width = 1600, height = 900;
-    int lod = 1;      // 0 Low, 1 Medium, 2 High, 3 Ultra
+    int lod = 2;      // 0 Low, 1 Medium, 2 High, 3 Ultra
     int seaState = 4; // 0..9
     int timeOfDay = 4; // index into time presets (4 = Evening)
     bool vsync = true;
@@ -72,6 +72,7 @@ private:
     };
 
     void InitWindow(HINSTANCE hInst);
+    void ToggleFullscreen();
     void InitSystems();
     void ApplyLod(int lod, bool firstTime);
     void ApplySeaState();
@@ -105,7 +106,7 @@ private:
     Sky::Params skyParams;
 
     // UI-adjustable state.
-    int uiLod = 1;
+    int uiLod = 2;
     int uiSeaState = 4;
     int uiTimeOfDay = 4;
     float uiWindDirDeg = 190.0f;
@@ -145,6 +146,9 @@ private:
     double perfFreq = 0.0;
     int64_t lastTicks = 0;
     bool running = true;
+    bool fullscreen = false;
+    WINDOWPLACEMENT windowedPlacement{};
+    LONG_PTR windowedStyle = 0;
     bool mouseLook = false;
     POINT lastMouse = {};
 

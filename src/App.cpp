@@ -19,6 +19,8 @@ using namespace DirectX;
 
 namespace
 {
+    ImFont* hintFont = nullptr;
+
     struct TimePreset
     {
         const char* name;
@@ -244,6 +246,44 @@ void App::InitWindow(HINSTANCE hInst)
     ShowWindow(hwnd, SW_SHOW);
 }
 
+void App::ToggleFullscreen()
+{
+    if (!hwnd || IsIconic(hwnd))
+        return;
+
+    if (!fullscreen)
+    {
+        windowedPlacement = {};
+        windowedPlacement.length = sizeof(windowedPlacement);
+        if (!GetWindowPlacement(hwnd, &windowedPlacement))
+            return;
+        windowedStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
+
+        HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = {};
+        mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoW(mon, &mi))
+            return;
+
+        // Popup covering the monitor rectangle hides the caption and the taskbar.
+        SetWindowLongPtrW(hwnd, GWL_STYLE, (windowedStyle & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+        SetWindowPos(hwnd, HWND_TOP,
+            mi.rcMonitor.left, mi.rcMonitor.top,
+            mi.rcMonitor.right - mi.rcMonitor.left,
+            mi.rcMonitor.bottom - mi.rcMonitor.top,
+            SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        fullscreen = true;
+    }
+    else
+    {
+        SetWindowLongPtrW(hwnd, GWL_STYLE, windowedStyle);
+        SetWindowPlacement(hwnd, &windowedPlacement);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        fullscreen = false;
+    }
+}
+
 void App::InitSystems()
 {
     ctx.Init(hwnd, opts.width, opts.height);
@@ -252,6 +292,10 @@ void App::InitSystems()
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui::GetStyle().WindowRounding = 6.0f;
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->AddFontDefault();
+    // Narrow face so the two-line control hint fits the panel.
+    hintFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\ARIALN.TTF", 16.0f);
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX12_Init(ctx.Dev(), GpuContext::kFramesInFlight, GpuContext::kBackbufferFormat,
         ctx.srvHeap.Get(), ctx.SrvCpu(DescSlot::ImGuiFont), ctx.SrvGpu(DescSlot::ImGuiFont));
@@ -599,52 +643,66 @@ void App::BuildUi(float dt)
     ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("Rough Open Ocean", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("%.1f FPS  (%.2f ms)", fpsDisplay, fpsDisplay > 0 ? 1000.0f / fpsDisplay : 0.0f);
+    // One tab after "ms)", then the button on the same line.
+    ImGui::SameLine(0.0f, ImGui::CalcTextSize("    ").x);
+    bool collapseAll = false;
+    if (ImGui::Button("Collapse_ALL"))
+        collapseAll = true;
     ImGui::Separator();
 
-    // Level of detail.
-    const char* lodNames[kNumLods];
-    for (int i = 0; i < kNumLods; ++i)
-        lodNames[i] = kLods[i].name;
-    if (ImGui::Combo("Level of detail", &uiLod, lodNames, kNumLods))
+    // Applied to every section header below, this frame only.
+    auto sectionOpen = [&](const char* label, ImGuiTreeNodeFlags flags = 0)
     {
-        // applied at the top of the next frame
-    }
+        if (collapseAll)
+            ImGui::SetNextItemOpen(false, ImGuiCond_Always);
+        return ImGui::CollapsingHeader(label, flags);
+    };
 
-    // Time of day.
-    const char* timeNames[kNumTimes];
-    for (int i = 0; i < kNumTimes; ++i)
-        timeNames[i] = kTimes[i].name;
-    if (ImGui::Combo("Time of day", &uiTimeOfDay, timeNames, kNumTimes))
+    // Everyday view controls. Open on launch; Collapse_ALL can close it.
+    if (sectionOpen("BASICs", ImGuiTreeNodeFlags_DefaultOpen))
     {
-        UpdateLighting();
-        sky.MarkDirty();
-    }
+        const char* lodNames[kNumLods];
+        for (int i = 0; i < kNumLods; ++i)
+            lodNames[i] = kLods[i].name;
+        if (ImGui::Combo("Level of detail", &uiLod, lodNames, kNumLods))
+        {
+            // applied at the top of the next frame
+        }
 
-    // Sea state.
-    if (ImGui::SliderInt("Sea state", &uiSeaState, 0, 9, kSeas[uiSeaState].name))
-    {
-        ApplySeaState();
-        spectrumDirty = true;
-    }
+        const char* timeNames[kNumTimes];
+        for (int i = 0; i < kNumTimes; ++i)
+            timeNames[i] = kTimes[i].name;
+        if (ImGui::Combo("Time of day", &uiTimeOfDay, timeNames, kNumTimes))
+        {
+            UpdateLighting();
+            sky.MarkDirty();
+        }
 
-    // Water events: what a left-click on the water does. Both events also fire
-    // from the keyboard (M / V), so there are no buttons here - a "Whirlpool"
-    // button would collide with the Whirlpool section header below, which Dear
-    // ImGui hashes to the same ID.
-    {
+        if (ImGui::SliderInt("Sea state", &uiSeaState, 0, 9, kSeas[uiSeaState].name))
+        {
+            ApplySeaState();
+            spectrumDirty = true;
+        }
+
+        // What a left-click on the water does. The radio labels carry "##click"
+        // so they do not share an ID with the Meteorite / Whirlpool headers.
         ImGui::TextUnformatted("Left-click on water:");
         ImGui::SameLine();
         ImGui::RadioButton("Meteorite##click", &uiClickMode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Whirlpool##click", &uiClickMode, 1);
+    }
+
+    if (sectionOpen("Meteorite"))
+    {
         ImGui::SliderFloat("Impact power", &uiMeteorPower, 1.0f, 8.0f, "%.1f m");
     }
-    ImGui::Separator();
 
     // Whirlpool shape. Everything here is captured when a vortex spawns, so
     // editing a slider never snaps one that is already spinning.
-    if (ImGui::CollapsingHeader("Whirlpool", ImGuiTreeNodeFlags_DefaultOpen))
+    if (sectionOpen("Whirlpool"))
     {
         auto hint = [](const char* text)
         {
@@ -693,7 +751,7 @@ void App::BuildUi(float dt)
         }
         else
         {
-            ImGui::TextDisabled("Idle - click the water (or press V) to open a drain.");
+            ImGui::TextDisabled("Idle - click the water to open a drain.");
         }
 
         ImGui::SliderFloat("Funnel depth", &uiWhirl.depth, 0.5f, 30.0f, "%.1f m");
@@ -729,7 +787,7 @@ void App::BuildUi(float dt)
         }
     }
 
-    if (ImGui::CollapsingHeader("Waves", ImGuiTreeNodeFlags_DefaultOpen))
+    if (sectionOpen("Waves"))
     {
         if (ImGui::SliderFloat("Wind direction", &uiWindDirDeg, 0.0f, 360.0f, "%.0f deg"))
         {
@@ -771,7 +829,7 @@ void App::BuildUi(float dt)
                               "Higher = calmer, cleaner surface with less glinting.");
     }
 
-    if (ImGui::CollapsingHeader("Rendering"))
+    if (sectionOpen("Rendering"))
     {
         ImGui::SliderFloat("Exposure", &uiExposureMul, 0.3f, 3.0f, "%.2fx");
         ImGui::SliderFloat("Bloom", &uiBloom, 0.0f, 0.3f, "%.3f");
@@ -785,14 +843,14 @@ void App::BuildUi(float dt)
         ImGui::Checkbox("VSync", &uiVsync);
     }
 
-    if (ImGui::CollapsingHeader("Buoy"))
+    if (sectionOpen("Buoy"))
     {
         ImGui::SliderFloat("Flash period", &buoy.flashPeriod, 0.6f, 6.0f, "%.1f s");
         ImGui::SliderFloat("Flash duration", &buoy.flashDuration, 0.1f, 1.5f, "%.2f s");
         ImGui::SliderFloat("Lamp intensity", &buoy.lampIntensity, 2.0f, 120.0f, "%.0f");
     }
 
-    if (ImGui::CollapsingHeader("Sound"))
+    if (sectionOpen("Sound"))
     {
         if (audio.Available())
         {
@@ -810,8 +868,21 @@ void App::BuildUi(float dt)
     }
 
     ImGui::Separator();
-    ImGui::TextDisabled("RMB drag: look around  |  WASD/QE: move  |  LMB: water event");
-    ImGui::TextDisabled("Shift: fast  |  Wheel: speed  |  M: meteorite  |  V: whirlpool  |  Esc: quit");
+    // Arial Narrow keeps these two lines inside the panel. Proggy at full size
+    // would stretch it, so fall back to a smaller scale if that face is missing.
+    const ImVec4 hintCol(0.91f, 0.18f, 0.34f, 1.0f);
+    if (hintFont)
+        ImGui::PushFont(hintFont);
+    else
+        ImGui::SetWindowFontScale(0.72f);
+    ImGui::PushStyleColor(ImGuiCol_Text, hintCol);
+    ImGui::TextUnformatted("RMB drag: look around  |  WASD/QE: move  |  F11: fullscreen");
+    ImGui::TextUnformatted("LMB: water event  |  Shift: fast  |  Wheel: speed  |  Esc: quit");
+    ImGui::PopStyleColor();
+    if (hintFont)
+        ImGui::PopFont();
+    else
+        ImGui::SetWindowFontScale(1.0f);
     ImGui::End();
 }
 
@@ -870,13 +941,19 @@ LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             camera.moveSpeed = std::clamp(camera.moveSpeed * std::pow(1.25f, steps), 0.5f, 500.0f);
         }
         return 0;
+    case WM_SYSKEYDOWN:
+        // Alt+Enter. Bit 29 is the context code (Alt held); bit 30 is the previous state.
+        if (wp == VK_RETURN && (lp & (1 << 29)) && (lp & (1 << 30)) == 0)
+        {
+            ToggleFullscreen();
+            return 0;
+        }
+        break;
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE)
             PostQuitMessage(0);
-        if (wp == 'M' && (!io || !io->WantCaptureKeyboard))
-            LaunchMeteor();
-        if (wp == 'V' && (!io || !io->WantCaptureKeyboard))
-            SpawnWhirlpool();
+        if (wp == VK_F11 && (lp & (1 << 30)) == 0)
+            ToggleFullscreen();
         if (wp >= '1' && wp <= '0' + kNumTimes && (!io || !io->WantCaptureKeyboard))
         {
             uiTimeOfDay = int(wp - '1');

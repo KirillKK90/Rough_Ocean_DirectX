@@ -102,7 +102,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         {
             LogF("RoughOcean options:\n"
                  "  --w N --h N        window size (default 1600x900)\n"
-                 "  --lod 0..3         level of detail: Low/Medium/High/Ultra (default 1)\n"
+                 "  --lod 0..3         level of detail: Low/Medium/High/Ultra (default 2)\n"
                  "  --sea 0..9         sea state (default 4)\n"
                  "  --time 0..6        early morning/morning/noon/afternoon/evening/late evening/night\n"
                  "  --frames N         benchmark: run N frames, print avg FPS, exit\n"
