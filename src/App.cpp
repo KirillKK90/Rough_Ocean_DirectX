@@ -10,6 +10,7 @@
 #include <wincodec.h>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "backends/imgui_impl_dx12.h"
 #include "backends/imgui_impl_win32.h"
 
@@ -20,6 +21,119 @@ using namespace DirectX;
 namespace
 {
     ImFont* hintFont = nullptr;
+    ImFont* hintFontLarge = nullptr;
+    ImFont* menuFontLarge = nullptr;
+    HCURSOR enlargedCursor = nullptr;
+    // 2x keeps ProggyClean on its pixel grid and is enough to read on a 4K display.
+    constexpr float kMenuEnlarge = 2.0f;
+
+    // A 2x copy of the system arrow. The hotspot scales with the image so clicks
+    // still land on the tip.
+    HCURSOR MakeEnlargedArrow(int scale)
+    {
+        HCURSOR src = LoadCursorW(nullptr, IDC_ARROW);
+        ICONINFO ii = {};
+        if (!src || !GetIconInfo(src, &ii) || !ii.hbmColor)
+        {
+            if (ii.hbmMask) DeleteObject(ii.hbmMask);
+            if (ii.hbmColor) DeleteObject(ii.hbmColor);
+            int w = GetSystemMetrics(SM_CXCURSOR) * scale;
+            int h = GetSystemMetrics(SM_CYCURSOR) * scale;
+            return (HCURSOR)CopyImage(src, IMAGE_CURSOR, w, h, 0);
+        }
+
+        BITMAP bm = {};
+        GetObject(ii.hbmColor, sizeof(bm), &bm);
+        const int srcW = bm.bmWidth;
+        const int srcH = bm.bmHeight;
+        const int dstW = srcW * scale;
+        const int dstH = srcH * scale;
+
+        HDC hdc = GetDC(nullptr);
+        BITMAPINFO srcInfo = {};
+        srcInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        srcInfo.bmiHeader.biWidth = srcW;
+        srcInfo.bmiHeader.biHeight = srcH; // bottom-up, matches GetDIBits
+        srcInfo.bmiHeader.biPlanes = 1;
+        srcInfo.bmiHeader.biBitCount = 32;
+        srcInfo.bmiHeader.biCompression = BI_RGB;
+
+        std::vector<uint32_t> srcPx(size_t(srcW) * srcH);
+        int rows = GetDIBits(hdc, ii.hbmColor, 0, srcH, srcPx.data(), &srcInfo, DIB_RGB_COLORS);
+
+        std::vector<uint32_t> dstPx(size_t(dstW) * dstH);
+        if (rows > 0)
+        {
+            for (int y = 0; y < dstH; ++y)
+            {
+                int sy = std::min(y / scale, srcH - 1);
+                for (int x = 0; x < dstW; ++x)
+                {
+                    int sx = std::min(x / scale, srcW - 1);
+                    dstPx[size_t(y) * dstW + x] = srcPx[size_t(sy) * srcW + sx];
+                }
+            }
+        }
+
+        BITMAPINFO dstInfo = srcInfo;
+        dstInfo.bmiHeader.biWidth = dstW;
+        dstInfo.bmiHeader.biHeight = -dstH; // top-down DIB section; pixels are stored top-down below
+        // Rebuild top-down so the DIB section matches a negative height.
+        std::vector<uint32_t> topDown(dstPx.size());
+        for (int y = 0; y < dstH; ++y)
+            memcpy(&topDown[size_t(y) * dstW], &dstPx[size_t(dstH - 1 - y) * dstW], size_t(dstW) * 4);
+
+        void* colorBits = nullptr;
+        HBITMAP color = CreateDIBSection(hdc, &dstInfo, DIB_RGB_COLORS, &colorBits, nullptr, 0);
+        if (colorBits)
+            memcpy(colorBits, topDown.data(), topDown.size() * 4);
+
+        const int maskStride = ((dstW + 31) / 32) * 4;
+        std::vector<uint8_t> maskPx(size_t(maskStride) * dstH, 0xFF);
+        BITMAPINFO mbi = {};
+        mbi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        mbi.bmiHeader.biWidth = dstW;
+        mbi.bmiHeader.biHeight = -dstH;
+        mbi.bmiHeader.biPlanes = 1;
+        mbi.bmiHeader.biBitCount = 1;
+        mbi.bmiHeader.biCompression = BI_RGB;
+        void* maskBits = nullptr;
+        HBITMAP mask = CreateDIBSection(hdc, &mbi, DIB_RGB_COLORS, &maskBits, nullptr, 0);
+        if (maskBits)
+            memcpy(maskBits, maskPx.data(), maskPx.size());
+
+        ICONINFO out = {};
+        out.fIcon = FALSE;
+        out.xHotspot = ii.xHotspot * scale;
+        out.yHotspot = ii.yHotspot * scale;
+        out.hbmMask = mask;
+        out.hbmColor = color;
+        HCURSOR cursor = (HCURSOR)CreateIconIndirect(&out);
+
+        if (color) DeleteObject(color);
+        if (mask) DeleteObject(mask);
+        DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        ReleaseDC(nullptr, hdc);
+        return cursor;
+    }
+
+    void ApplyEnlargedCursor(HWND hwnd, bool enlarged)
+    {
+        static bool wasEnlarged = false;
+        if (enlarged && enlargedCursor)
+        {
+            POINT pt;
+            if (GetCursorPos(&pt) && WindowFromPoint(pt) == hwnd)
+                SetCursor(enlargedCursor);
+            wasEnlarged = true;
+        }
+        else if (wasEnlarged)
+        {
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            wasEnlarged = false;
+        }
+    }
 
     struct TimePreset
     {
@@ -224,6 +338,11 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
     ctx.Shutdown();
+    if (enlargedCursor)
+    {
+        DestroyCursor(enlargedCursor);
+        enlargedCursor = nullptr;
+    }
     return 0;
 }
 
@@ -244,6 +363,7 @@ void App::InitWindow(HINSTANCE hInst)
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
         r.right - r.left, r.bottom - r.top, nullptr, nullptr, hInst, this);
     ShowWindow(hwnd, SW_SHOW);
+    enlargedCursor = MakeEnlargedArrow(int(kMenuEnlarge));
 }
 
 void App::ToggleFullscreen()
@@ -294,8 +414,15 @@ void App::InitSystems()
     ImGui::GetStyle().WindowRounding = 6.0f;
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->AddFontDefault();
-    // Narrow face so the two-line control hint fits the panel.
+    ImFontConfig bigCfg;
+    bigCfg.SizePixels = 13.0f * kMenuEnlarge;
+    bigCfg.OversampleH = bigCfg.OversampleV = 1;
+    bigCfg.PixelSnapH = true;
+    menuFontLarge = io.Fonts->AddFontDefault(&bigCfg);
+    // Narrow face so the two-line control hint fits the panel. The large
+    // copy is the same face at the ENLARGE scale.
     hintFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\ARIALN.TTF", 16.0f);
+    hintFontLarge = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\ARIALN.TTF", 16.0f * kMenuEnlarge);
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX12_Init(ctx.Dev(), GpuContext::kFramesInFlight, GpuContext::kBackbufferFormat,
         ctx.srvHeap.Get(), ctx.SrvCpu(DescSlot::ImGuiFont), ctx.SrvGpu(DescSlot::ImGuiFont));
@@ -687,25 +814,81 @@ void App::RenderFrame(float dt)
         BuildUi(dt);
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmd);
+        ApplyEnlargedCursor(hwnd, uiMenuEnlarged);
     }
 
     ctx.Transition(backbuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     ctx.EndFrame(uiVsync && opts.benchFrames == 0);
 }
 
+// Scale every metric ScaleAllSizes touches, pushed so the global style stays
+// at the default size. Call before Begin so the title bar and padding match.
+static int PushMenuMetrics(float scale)
+{
+    ImGuiStyle scaled = ImGui::GetStyle();
+    scaled.ScaleAllSizes(scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, scaled.WindowPadding);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, scaled.WindowRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, scaled.WindowBorderSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, scaled.WindowMinSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, scaled.FramePadding);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, scaled.FrameRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, scaled.FrameBorderSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, scaled.ItemSpacing);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, scaled.ItemInnerSpacing);
+    ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, scaled.IndentSpacing);
+    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, scaled.ScrollbarSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, scaled.ScrollbarRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, scaled.GrabMinSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, scaled.GrabRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, scaled.PopupRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, scaled.PopupBorderSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_SeparatorTextPadding, scaled.SeparatorTextPadding);
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, scaled.CellPadding);
+    return 18;
+}
+
 void App::BuildUi(float dt)
 {
+    int styleVars = 0;
+    bool menuFontPushed = false;
+    if (uiMenuEnlarged)
+    {
+        styleVars = PushMenuMetrics(kMenuEnlarge);
+        if (menuFontLarge)
+            ImGui::SetCurrentFont(menuFontLarge); // title bar is measured inside Begin
+    }
+
     ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("Rough Open Ocean", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    if (uiMenuEnlarged && menuFontLarge)
+    {
+        ImGui::PushFont(menuFontLarge);
+        menuFontPushed = true;
+    }
 
     ImGui::AlignTextToFramePadding();
     ImGui::Text("%.1f FPS  (%.2f ms)", fpsDisplay, fpsDisplay > 0 ? 1000.0f / fpsDisplay : 0.0f);
-    // One tab after "ms)", then the button on the same line.
+    // One tab after "ms)", then the buttons on the same line.
     ImGui::SameLine(0.0f, ImGui::CalcTextSize("    ").x);
     bool collapseAll = false;
     if (ImGui::Button("Collapse_ALL"))
         collapseAll = true;
+    ImGui::SameLine();
+    // Stay in the held-down color while the enlarged scale is on.
+    const bool enlargePushed = uiMenuEnlarged;
+    if (enlargePushed)
+    {
+        ImVec4 down = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+        ImGui::PushStyleColor(ImGuiCol_Button, down);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, down);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, down);
+    }
+    if (ImGui::Button("ENLARGE"))
+        uiMenuEnlarged = !uiMenuEnlarged;
+    if (enlargePushed)
+        ImGui::PopStyleColor(3);
     ImGui::Separator();
 
     // Applied to every section header below, this frame only.
@@ -930,24 +1113,37 @@ void App::BuildUi(float dt)
     ImGui::Separator();
     // Arial Narrow keeps these two lines inside the panel. Proggy at full size
     // would stretch it, so fall back to a smaller scale if that face is missing.
+    // The large face is the same text at the ENLARGE scale.
+    ImFont* hint = (uiMenuEnlarged && hintFontLarge) ? hintFontLarge : hintFont;
     const ImVec4 hintCol(0.91f, 0.18f, 0.34f, 1.0f);
-    if (hintFont)
-        ImGui::PushFont(hintFont);
+    if (hint)
+        ImGui::PushFont(hint);
     else
         ImGui::SetWindowFontScale(0.72f);
     ImGui::PushStyleColor(ImGuiCol_Text, hintCol);
     ImGui::TextUnformatted("RMB drag: look around  |  WASD/QE: move  |  F11: fullscreen");
     ImGui::TextUnformatted("LMB: water event  |  Shift: fast  |  Wheel: speed  |  Esc: quit");
     ImGui::PopStyleColor();
-    if (hintFont)
+    if (hint)
         ImGui::PopFont();
     else
         ImGui::SetWindowFontScale(1.0f);
+    if (menuFontPushed)
+        ImGui::PopFont();
     ImGui::End();
+
+    if (styleVars > 0)
+        ImGui::PopStyleVar(styleVars);
 }
 
 LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    // Take the cursor before Dear ImGui paints the normal-size arrow.
+    if (msg == WM_SETCURSOR && uiMenuEnlarged && enlargedCursor && LOWORD(lp) == HTCLIENT)
+    {
+        SetCursor(enlargedCursor);
+        return TRUE;
+    }
     if (ImGui_ImplWin32_WndProcHandler(wnd, msg, wp, lp))
         return 1;
     ImGuiIO* io = ImGui::GetCurrentContext() ? &ImGui::GetIO() : nullptr;
