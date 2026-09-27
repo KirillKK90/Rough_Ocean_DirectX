@@ -124,6 +124,7 @@ private:
     bool uiFxaa = true;
     int uiSoundMode = int(SoundMode::Soothing);
     float uiVolume = 0.8f;
+    float uiWhirlVolume = 1.0f; // drain layer, independent of the sea volume
     float uiMeteorPower = 4.0f;
     int uiClickMode = 1;        // left-click event: 0 = meteorite, 1 = whirlpool
     WhirlpoolParams uiWhirl;    // shape of the next whirlpool

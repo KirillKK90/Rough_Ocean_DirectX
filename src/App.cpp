@@ -558,6 +558,56 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     return va;
 }
 
+// Fold every live vortex into one earful: energy-weighted timbre, summed
+// loudness, stereo from where the drain sits relative to the view.
+static void GatherWhirlSound(const Whirlpool& whirl, const Camera& camera,
+                             float& loud, float& speed, float& radius, float& forcing,
+                             float& pan, float& near01)
+{
+    float sumAmp = 0, sumW = 0, sumSp = 0, sumR = 0, sumF = 0, sumPan = 0, sumNear = 0;
+    float cy = std::cos(camera.yaw), sy = std::sin(camera.yaw);
+    float height = std::clamp(1.15f - camera.pos.y / 280.0f, 0.15f, 1.0f);
+    for (uint32_t i = 0; i < Whirlpool::kMaxActive; ++i)
+    {
+        Whirlpool::Acoustic a;
+        if (!whirl.SlotAcoustic(i, a))
+            continue;
+        float dx = a.x - camera.pos.x;
+        float dz = a.z - camera.pos.z;
+        float horiz = std::sqrt(dx * dx + dz * dz);
+        float dist = std::sqrt(horiz * horiz + camera.pos.y * camera.pos.y);
+        float att = 1.0f / (1.0f + dist / (50.0f + 0.25f * std::max(a.reach, 40.0f)));
+        // A gentle power so the first seconds of spin-up are already audible,
+        // while a fast vortex still sits well above a slow one.
+        float e = std::pow(std::clamp(a.speed / 6.5f, 0.0f, 3.0f), 0.85f);
+        float amp = e * att * height;
+        float bearing = (horiz > 0.5f) ? (dx * cy - dz * sy) / horiz : 0.0f;
+        sumAmp += amp;
+        sumW += amp;
+        sumSp += amp * a.speed;
+        sumR += amp * a.radius;
+        sumF += amp * a.forcing;
+        sumPan += amp * std::clamp(bearing, -1.0f, 1.0f);
+        sumNear += amp * std::clamp(att, 0.0f, 1.0f);
+    }
+    if (sumW < 1e-5f)
+    {
+        loud = 0.0f;
+        speed = 0.0f;
+        radius = 6.0f;
+        forcing = 0.0f;
+        pan = 0.0f;
+        near01 = 1.0f;
+        return;
+    }
+    loud = std::tanh(sumAmp * 1.15f);
+    speed = sumSp / sumW;
+    radius = sumR / sumW;
+    forcing = sumF / sumW;
+    pan = sumPan / sumW;
+    near01 = sumNear / sumW;
+}
+
 void App::RenderFrame(float dt)
 {
     // Ocean sound follows the sea state, wave height and wave speed; it also
@@ -579,6 +629,12 @@ void App::RenderFrame(float dt)
     // Physics reads the readback slot BeginFrame just fenced.
     meteor.Update(dt * uiTimeScale);
     whirlpool.Update(dt * uiTimeScale);
+    if (audio.Available())
+    {
+        float loud, speed, radius, forcing, pan, near01;
+        GatherWhirlSound(whirlpool, camera, loud, speed, radius, forcing, pan, near01);
+        audio.SetWhirl(loud, speed, radius, forcing, pan, near01, uiWhirlVolume);
+    }
     // The moment the rock hits the water: splash + surge of spreading waves.
     bool flyingNow = meteor.Flying();
     if (prevMeteorFlying && !flyingNow)
@@ -859,7 +915,11 @@ void App::BuildUi(float dt)
             if (uiSoundMode == int(SoundMode::Soothing) && !audio.RecordingLoaded())
                 ImGui::TextDisabled("Recording missing - using synthesized sound.");
             ImGui::SliderFloat("Volume", &uiVolume, 0.0f, 1.0f, "%.2f");
-            ImGui::TextDisabled("Loudness follows the sea state.");
+            ImGui::SliderFloat("Whirlpool##sfx", &uiWhirlVolume, 0.0f, 1.5f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Loudness of a live drain. Independent of the sea.\n"
+                                  "1 is the default; turn it up if the vortex is hard to hear.");
+            ImGui::TextDisabled("Sea loudness follows the sea state.");
         }
         else
         {

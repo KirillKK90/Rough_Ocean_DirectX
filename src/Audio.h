@@ -41,6 +41,14 @@ public:
     // when the sound mode is Off. Cheap and thread-safe; call on the event.
     void PlayMeteor(MeteorSfx which);
 
+    // Whirlpool layer. loud is 0..1 perceptual level (distance already applied),
+    // speed is peak tangential m/s, radius is the live core in meters, forcing
+    // is 1 while the drain is pulling, pan is -1..1, near01 is 1 up close and
+    // 0 far (muffles the hiss). volume is the drain slider, separate from the
+    // sea. Silent in Off. Smoothed on the audio thread.
+    void SetWhirl(float loud, float speed, float radius, float forcing, float pan,
+                  float near01, float volume);
+
     // Offline verification: synth levels per storm setting + recording decode
     // stats, printed without playing anything. Returns process exit code.
     static int OfflineTest();

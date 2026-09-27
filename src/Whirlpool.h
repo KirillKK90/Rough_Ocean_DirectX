@@ -50,6 +50,19 @@ public:
     float SlotAge(uint32_t i) const { return v[i].t; }
     float SlotLifetime(uint32_t i) const { return v[i].maxAge; }
 
+    // Live acoustics of one vortex: speed is the current peak tangential
+    // speed, forcing is 1 while the drain is still pulling and falls as the
+    // funnel is released. False when the slot is idle.
+    struct Acoustic
+    {
+        float speed = 0;    // m/s
+        float radius = 0;   // m, current core
+        float forcing = 0;  // 0..1
+        float x = 0, z = 0;
+        float reach = 0;    // m
+    };
+    bool SlotAcoustic(uint32_t i, Acoustic& out) const;
+
     // FrameCB values; see the gWhirl* packing comment in Common.hlsli.
     void FillCB(DirectX::XMFLOAT4 whirl[kMaxActive], DirectX::XMFLOAT4 whirl2[kMaxActive],
                 DirectX::XMFLOAT4 whirl3[kMaxActive]) const;

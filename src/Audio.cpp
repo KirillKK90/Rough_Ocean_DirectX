@@ -462,6 +462,138 @@ namespace
         return true;
     }
 
+    // Whirlpool: a draining vortex, not a wave. Layers are the ones a real
+    // funnel makes — a low turbulent roar, a hollow throat resonance from the
+    // air core, surface-shear hiss, and irregular gulps as air is pulled
+    // under. Every layer follows the live spin; nothing is a looped sample.
+    struct WhirlSynth
+    {
+        float loud = 0, speed = 0, radius = 6, forcing = 0, pan = 0, nearness = 1, vol = 0;
+        Rng rngL{ 0x51a7c3e1u }, rngR{ 0x9b23d047u }, rngM{ 0xc0ffee11u };
+        float roar1 = 0, roar2 = 0;
+        float hLhi = 0, hLlo = 0, hRhi = 0, hRlo = 0;
+        float res1 = 0, res2 = 0;
+        float thump1 = 0, thump2 = 0;
+        float flutterA = 0.4f, flutterB = 2.2f;
+        float gulpTimer = 0.35f * kRate;
+        float gulpEnv = 0, gulpAmp = 0, gulpF = 180, gulpThump = 0;
+
+        void Mix(float* out, uint32_t frames, float tLoud, float tSpeed, float tRadius,
+                 float tForce, float tPan, float tNear, float tVol);
+    };
+
+    void WhirlSynth::Mix(float* out, uint32_t frames, float tLoud, float tSpeed, float tRadius,
+                         float tForce, float tPan, float tNear, float tVol)
+    {
+        auto coef = [](float tauSec) {
+            return 1.0f - std::exp(-1.0f / (std::max(tauSec, 1e-3f) * kRate));
+        };
+        const float aSp = coef(0.40f), aRad = coef(0.45f), aFc = coef(0.30f);
+        const float aPan = coef(0.18f), aNear = coef(0.35f), aVol = coef(0.20f);
+
+        for (uint32_t i = 0; i < frames; ++i)
+        {
+            float aLoud = coef(tLoud > loud ? 0.18f : 0.70f);
+            loud += (tLoud - loud) * aLoud;
+            speed += (tSpeed - speed) * aSp;
+            radius += (tRadius - radius) * aRad;
+            forcing += (tForce - forcing) * aFc;
+            pan += (tPan - pan) * aPan;
+            nearness += (tNear - nearness) * aNear;
+            vol += (tVol - vol) * aVol;
+
+            if (loud < 2e-4f && tLoud < 2e-4f && gulpEnv < 1e-3f && vol < 1e-3f)
+                continue;
+
+            float nL = rngL.Next(), nR = rngR.Next(), nM = rngM.Next();
+            float sp = std::clamp(speed / 18.0f, 0.0f, 1.0f);
+            float rad = std::clamp(radius, 1.5f, 80.0f);
+            float frc = std::clamp(forcing, 0.0f, 1.0f);
+            float nr = std::clamp(nearness, 0.0f, 1.0f);
+
+            // Hollow throat: smaller core and a still-pulling plug sit higher.
+            float throat = (78.0f + 340.0f / (1.0f + rad / 5.5f)) * (0.72f + 0.38f * frc);
+
+            // Gulps: air swallowed by the drain. Faster and brighter while the
+            // plug is pulling; slower, duller booms once the funnel is released.
+            gulpTimer -= 1.0f;
+            if (gulpTimer <= 0.0f && loud > 0.05f)
+            {
+                float u = rngM.Next() * 0.5f + 0.5f;
+                float u2 = rngL.Next() * 0.5f + 0.5f;
+                float rate = 0.35f + 5.0f * frc * std::sqrt(loud) * (0.30f + 0.70f * sp);
+                rate = std::max(rate, 0.12f);
+                gulpTimer = (0.45f + 1.15f * u) / rate * float(kRate);
+                gulpAmp = (0.40f + 0.60f * u2) * loud * (0.50f + 0.50f * frc);
+                gulpEnv = 1.0f;
+                gulpF = throat * (1.35f + 0.55f * u);
+                gulpThump = (0.35f + 0.65f * u) * loud * (0.6f + 0.4f * (1.0f - frc));
+            }
+            gulpEnv *= std::exp(-1.0f / (0.13f * kRate));
+            if (gulpEnv > 0.02f)
+                gulpF += (throat * 0.42f - gulpF) * 0.0045f; // pitch falls through the gulp
+            gulpThump *= std::exp(-1.0f / (0.050f * kRate));
+
+            // Turbulent body of the turning water. Farther away loses the top.
+            float roarFc = (80.0f + 460.0f * sp) * (0.40f + 0.60f * nr);
+            float aR = LpCoef(std::clamp(roarFc, 40.0f, 2000.0f));
+            roar1 += aR * (nM - roar1);
+            roar2 += aR * (roar1 - roar2);
+            float roar = roar2 * (2.0f / std::max(aR, 1.0e-4f)) * (0.045f + 0.07f * sp) * loud;
+
+            // Surface shear along the rim.
+            float aHh = LpCoef((1600.0f + 2400.0f * sp) * (0.45f + 0.55f * nr));
+            float aHl = LpCoef(420.0f + 500.0f * sp);
+            hLhi += aHh * (nL - hLhi); hLlo += aHl * (nL - hLlo);
+            hRhi += aHh * (nR - hRhi); hRlo += aHl * (nR - hRlo);
+            float hissAmt = loud * (0.020f + 0.11f * sp) * (0.25f + 0.75f * nr) * (0.40f + 0.60f * frc);
+            float hissL = (hLhi - hLlo) * 1.5f * hissAmt;
+            float hissR = (hRhi - hRlo) * 1.5f * hissAmt;
+
+            // Air-core resonance, kicked harder on each gulp.
+            float drive = nM * (0.0035f * loud + 0.040f * gulpEnv * gulpAmp);
+            float fRes = std::clamp(gulpEnv > 0.08f ? gulpF : throat, 42.0f, 720.0f);
+            float w = kTwoPi * fRes / float(kRate);
+            float pole = 0.962f + 0.028f * frc;
+            float c1 = 2.0f * pole * std::cos(w);
+            float c2 = pole * pole;
+            float y = drive + c1 * res1 - c2 * res2;
+            res2 = res1;
+            res1 = std::clamp(y, -1.2f, 1.2f);
+            float throatSnd = res1 * (0.28f + 0.12f * frc) * std::max(loud, 0.35f * gulpEnv);
+
+            float aT = LpCoef(95.0f + 40.0f * (1.0f - frc));
+            thump1 += aT * (nM * gulpThump * 1.4f - thump1);
+            thump2 += aT * (thump1 - thump2);
+            float thump = thump2 * (2.0f / std::max(aT, 1.0e-4f)) * 0.18f;
+
+            flutterA += kTwoPi * (0.13f + 0.70f * sp) / float(kRate);
+            flutterB += kTwoPi * (0.05f + 0.16f * sp) / float(kRate);
+            if (flutterA > kTwoPi) flutterA -= kTwoPi;
+            if (flutterB > kTwoPi) flutterB -= kTwoPi;
+            float flutter = 0.84f + 0.16f * std::sin(flutterA) * (0.60f + 0.40f * std::sin(flutterB));
+
+            float body = (roar + throatSnd + thump) * flutter;
+            float p = std::clamp(pan, -1.0f, 1.0f);
+            float gL = std::sqrt(0.5f * (1.0f - p));
+            float gR = std::sqrt(0.5f * (1.0f + p));
+            float gain = vol * 1.05f * (0.72f + 0.28f * nr);
+            float sL = out[i * 2 + 0] + (body + hissL) * gL * gain;
+            float sR = out[i * 2 + 1] + (body + hissR) * gR * gain;
+            // Leave the sea untouched below the knee; only bend the peaks.
+            auto knee = [](float x) {
+                const float k = 0.88f;
+                float ax = std::fabs(x);
+                if (ax <= k)
+                    return x;
+                float sign = x < 0.0f ? -1.0f : 1.0f;
+                return sign * (k + (1.0f - k) * std::tanh((ax - k) / (1.0f - k)));
+            };
+            out[i * 2 + 0] = knee(sL);
+            out[i * 2 + 1] = knee(sR);
+        }
+    }
+
     // XAudio2 buffer-completion callback: just wakes the synth thread.
     struct VoiceCallback : IXAudio2VoiceCallback
     {
@@ -497,6 +629,9 @@ struct OceanAudio::Impl
     std::atomic<float> targetStorm{ 0.35f };
     std::atomic<float> targetMaster{ 0.0f };
     std::atomic<int> mode{ int(SoundMode::Soothing) };
+    std::atomic<float> whirlLoud{ 0 }, whirlSpeed{ 0 }, whirlRadius{ 6 };
+    std::atomic<float> whirlForce{ 0 }, whirlPan{ 0 }, whirlNear{ 1 }, whirlUserVol{ 1 };
+    WhirlSynth whirl;
 
     void SubmitNext()
     {
@@ -509,6 +644,9 @@ struct OceanAudio::Impl
         float* buf = buffers[nextBuffer];
         nextBuffer = (nextBuffer + 1) % kNumBuffers;
         synth.Render(buf, kBlockFrames, targetStorm.load(), synthMaster, rumbleOnly);
+        float whirlVol = (m == SoundMode::Off) ? 0.0f : whirlUserVol.load();
+        whirl.Mix(buf, kBlockFrames, whirlLoud.load(), whirlSpeed.load(), whirlRadius.load(),
+                  whirlForce.load(), whirlPan.load(), whirlNear.load(), whirlVol);
         XAUDIO2_BUFFER xb = {};
         xb.AudioBytes = kBlockFrames * 2 * sizeof(float);
         xb.pAudioData = reinterpret_cast<const BYTE*>(buf);
@@ -700,6 +838,22 @@ void OceanAudio::SetParams(float storm01, float motion, float volume, SoundMode 
     impl->mode.store(int(mode));
 }
 
+void OceanAudio::SetWhirl(float loud, float speed, float radius, float forcing, float pan,
+                          float near01, float volume)
+{
+    if (!impl)
+        return;
+    if (SoundMode(impl->mode.load()) == SoundMode::Off)
+        volume = 0.0f;
+    impl->whirlLoud.store(std::clamp(loud, 0.0f, 1.0f));
+    impl->whirlSpeed.store(std::max(speed, 0.0f));
+    impl->whirlRadius.store(std::max(radius, 0.0f));
+    impl->whirlForce.store(std::clamp(forcing, 0.0f, 1.0f));
+    impl->whirlPan.store(std::clamp(pan, -1.0f, 1.0f));
+    impl->whirlNear.store(std::clamp(near01, 0.0f, 1.0f));
+    impl->whirlUserVol.store(std::clamp(volume, 0.0f, 2.0f));
+}
+
 void OceanAudio::PlayMeteor(MeteorSfx which)
 {
     if (!impl)
@@ -759,6 +913,40 @@ int OceanAudio::OfflineTest()
         double rms = std::sqrt(sum2 / double(n));
         LogF("  storm %.2f: RMS %.4f  peak %.3f\n", storm, rms, peak);
         if (!std::isfinite(rms) || peak > 1.0001 || (storm > 0.2f && rms < 1e-4))
+            ok = false;
+    }
+
+    LogF("Whirlpool layer (6 s, full volume, close):\n");
+    struct WhirlCase { const char* name; float loud, speed, radius, forcing; };
+    const WhirlCase whirlCases[] = {
+        { "weak",      0.35f,  3.9f,  4.0f, 1.00f },
+        { "medium",    0.65f,  6.7f,  6.0f, 1.00f },
+        { "monstrous", 0.95f, 17.0f, 38.0f, 1.00f },
+        { "collapse",  0.50f,  4.0f,  8.0f, 0.15f },
+    };
+    for (const WhirlCase& c : whirlCases)
+    {
+        WhirlSynth w;
+        std::vector<float> buf(kBlockFrames * 2);
+        double sum2 = 0;
+        double peak = 0;
+        uint64_t n = 0;
+        for (int block = 0; block < 60; ++block)
+        {
+            std::fill(buf.begin(), buf.end(), 0.0f);
+            w.Mix(buf.data(), kBlockFrames, c.loud, c.speed, c.radius, c.forcing, 0.0f, 1.0f, 1.0f);
+            if (block < 4)
+                continue;
+            for (float v : buf)
+            {
+                sum2 += double(v) * v;
+                peak = std::max(peak, double(std::fabs(v)));
+                ++n;
+            }
+        }
+        double rms = std::sqrt(sum2 / double(std::max<uint64_t>(n, 1)));
+        LogF("  %-10s RMS %.4f  peak %.3f\n", c.name, rms, peak);
+        if (!std::isfinite(rms) || peak > 1.001 || rms < 0.03f || rms > 0.55f)
             ok = false;
     }
 

@@ -169,6 +169,30 @@ void Whirlpool::Update(float simDt)
     }
 }
 
+bool Whirlpool::SlotAcoustic(uint32_t i, Acoustic& a) const
+{
+    if (i >= kMaxActive || !v[i].active)
+        return false;
+    const Vortex& w = v[i];
+    float rc, D;
+    Envelope(w.t, w.p, rc, D);
+    // v_theta peak = sqrt(2 g D) * (1 - exp(-beta)); D is the live funnel depth.
+    a.speed = std::sqrt(2.0f * kG * std::max(D, 0.0f)) * (1.0f - std::exp(-kBeta));
+    a.radius = rc;
+    a.x = w.cx;
+    a.z = w.cz;
+    a.reach = w.p.reach;
+    if (w.t <= w.p.grow)
+        a.forcing = 1.0f;
+    else
+    {
+        float x = (w.t - w.p.grow) / std::max(w.p.tau, 1e-3f);
+        float ex = std::exp(-std::min(x, 20.0f));
+        a.forcing = 2.0f * ex / (1.0f + ex * ex); // sech, same release as the spin
+    }
+    return true;
+}
+
 bool Whirlpool::AnyActive() const
 {
     for (const Vortex& w : v)
