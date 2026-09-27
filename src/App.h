@@ -72,6 +72,7 @@ private:
     };
 
     void InitWindow(HINSTANCE hInst);
+    void UpdateWindowTitle(uint32_t w, uint32_t h);
     void ToggleFullscreen();
     void InitSystems();
     void ApplyLod(int lod, bool firstTime);

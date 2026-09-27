@@ -362,8 +362,18 @@ void App::InitWindow(HINSTANCE hInst)
     hwnd = CreateWindowExW(0, wc.lpszClassName, L"Rough Open Ocean - DirectX 12",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
         r.right - r.left, r.bottom - r.top, nullptr, nullptr, hInst, this);
+    UpdateWindowTitle(opts.width, opts.height);
     ShowWindow(hwnd, SW_SHOW);
     enlargedCursor = MakeEnlargedArrow(int(kMenuEnlarge));
+}
+
+void App::UpdateWindowTitle(uint32_t w, uint32_t h)
+{
+    if (!hwnd || w == 0 || h == 0)
+        return;
+    wchar_t title[96];
+    swprintf_s(title, L"Rough Open Ocean - DirectX 12 (%u x %u)", w, h);
+    SetWindowTextW(hwnd, title);
 }
 
 void App::ToggleFullscreen()
@@ -1158,6 +1168,7 @@ LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 ctx.Resize(w, h);
                 post.Create(ctx, w, h);
+                UpdateWindowTitle(w, h);
             }
         }
         return 0;
