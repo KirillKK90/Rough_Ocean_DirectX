@@ -150,6 +150,7 @@ private:
     int64_t lastTicks = 0;
     bool running = true;
     bool fullscreen = false;
+    bool requestFullscreenToggle = false; // button sets this; applied between frames
     WINDOWPLACEMENT windowedPlacement{};
     LONG_PTR windowedStyle = 0;
     bool mouseLook = false;

@@ -261,6 +261,15 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
         if (!running)
             break;
 
+        // The menu button is handled inside RenderFrame, while the backbuffer is
+        // still bound. SetWindowPos would send WM_SIZE and ResizeBuffers would
+        // throw, so apply the toggle here, same as F11, before the next frame.
+        if (requestFullscreenToggle)
+        {
+            requestFullscreenToggle = false;
+            ToggleFullscreen();
+        }
+
         if (pendingLod != uiLod)
         {
             ApplyLod(uiLod, false);
@@ -898,6 +907,20 @@ void App::BuildUi(float dt)
     if (ImGui::Button("ENLARGE"))
         uiMenuEnlarged = !uiMenuEnlarged;
     if (enlargePushed)
+        ImGui::PopStyleColor(3);
+
+    // Next row, under the FPS readout. Stay held down while the window covers the monitor.
+    const bool fullscreenPushed = fullscreen;
+    if (fullscreenPushed)
+    {
+        ImVec4 down = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+        ImGui::PushStyleColor(ImGuiCol_Button, down);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, down);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, down);
+    }
+    if (ImGui::Button("FullScreen"))
+        requestFullscreenToggle = true;
+    if (fullscreenPushed)
         ImGui::PopStyleColor(3);
     ImGui::Separator();
 
