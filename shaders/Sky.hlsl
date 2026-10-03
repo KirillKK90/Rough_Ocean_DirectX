@@ -11,6 +11,10 @@ cbuffer SkyCB : register(b0)
     float3 gSunDir;  float gSunI;
     float3 gMoonDir; float gMoonI;
     float gCloudCover; float gRes; uint gMipSrc; float gPadS;
+    float gHaze;       // aerosol turbidity multiplier on BetaM (1 = clear)
+    float gOzone;      // ozone column, 0 = off, 1 = standard
+    float gCloudSunlit; // 1 = cirrus lit by the sunlight that reaches its altitude
+    float gPadS2;
 }
 
 RWTexture2DArray<float4> uCube : register(u2);
@@ -22,6 +26,16 @@ static const float3 BetaR = float3(5.8e-6, 13.5e-6, 33.1e-6);
 static const float BetaM = 4.5e-6;
 static const float Hr = 8500.0;
 static const float Hm = 1200.0;
+// Ozone absorbs in the Chappuis band (peak in the orange-green, none in the
+// red). Negligible for a high sun, but a horizon ray crosses the layer for
+// hundreds of km: it deepens the sunset reds and keeps the zenith blue.
+// Absorption at peak density, tent profile 10-40 km (Bruneton 2017).
+static const float3 BetaO = float3(0.650e-6, 1.881e-6, 0.085e-6);
+
+float OzoneDensity(float h)
+{
+    return max(0.0, 1.0 - abs(h - 25000.0) / 15000.0);
+}
 
 float2 RaySphere(float3 ro, float3 rd, float radius)
 {
@@ -48,20 +62,38 @@ float PhaseMie(float mu)
          / ((2.0 + g2) * pow(abs(1.0 + g2 - 2.0 * g * mu), 1.5));
 }
 
-// Optical depth along a ray to the top of the atmosphere.
-float2 OpticalDepth(float3 pos, float3 dir, int steps)
+// Optical depth along a ray to the top of the atmosphere: x Rayleigh, y Mie,
+// z ozone (in metres at the reference density).
+float3 OpticalDepth(float3 pos, float3 dir, int steps)
 {
     float t = RaySphere(pos, dir, Ra).y;
     float dt = t / float(steps);
-    float2 od = 0;
+    float3 od = 0;
     float3 p = pos + dir * dt * 0.5;
     for (int i = 0; i < steps; ++i)
     {
         float h = length(p) - Re;
-        od += exp(-h / float2(Hr, Hm)) * dt;
+        od.xy += exp(-h / float2(Hr, Hm)) * dt;
+        od.z += OzoneDensity(h) * dt;
         p += dir * dt;
     }
     return od;
+}
+
+// Aerosol beyond the clear baseline (gHaze > 1) is spectral, Angstrom exponent
+// 1.3 (fine haze dims blue more than red): relative to 550 nm at 680/550/440.
+// Keep in sync with ExtraTransmittance in App.cpp.
+static const float3 kHazeSpectrum = float3(0.76, 1.0, 1.34);
+
+float3 MieBeta()
+{
+    return BetaM * (1.0 + (gHaze - 1.0) * kHazeSpectrum);
+}
+
+// Total extinction for an optical-depth triple.
+float3 Extinction(float3 od)
+{
+    return BetaR * od.x + MieBeta() * 1.1 * od.y + BetaO * gOzone * od.z;
 }
 
 float3 MarchScattering(float3 rd, float3 lightDir, float intensity)
@@ -80,27 +112,26 @@ float3 MarchScattering(float3 rd, float3 lightDir, float intensity)
     float phM = PhaseMie(mu);
 
     float3 sumR = 0, sumM = 0;
-    float2 odView = 0;
+    float3 odView = 0;
     float3 p = ro + rd * dt * 0.5;
     for (int i = 0; i < STEPS; ++i)
     {
         float h = max(length(p) - Re, 0.0);
         float2 dens = exp(-h / float2(Hr, Hm)) * dt;
-        odView += dens;
+        odView += float3(dens, OzoneDensity(h) * dt);
 
         // Light reaching this sample (skip if the planet shadows it).
         float2 tls = RaySphere(p, lightDir, Re);
         if (!(tls.x > 0.0 && tls.y > 0.0))
         {
-            float2 odLight = OpticalDepth(p, lightDir, 6);
-            float3 tau = BetaR * (odView.x + odLight.x) + BetaM * 1.1 * (odView.y + odLight.y);
-            float3 attn = exp(-tau);
+            float3 odLight = OpticalDepth(p, lightDir, 6);
+            float3 attn = exp(-Extinction(odView + odLight));
             sumR += attn * dens.x;
             sumM += attn * dens.y;
         }
         p += rd * dt;
     }
-    return (sumR * BetaR * phR + sumM * BetaM * phM) * intensity;
+    return (sumR * BetaR * phR + sumM * MieBeta() * phM) * intensity;
 }
 
 // Thin high-altitude cirrus, baked into the cube (cheap, static per preset).
@@ -116,6 +147,18 @@ float3 ApplyCirrus(float3 col, float3 rd, float3 lightDir, float intensity)
     cov *= smoothstep(0.01, 0.12, rd.y); // fade into horizon haze
     float sunH = saturate(lightDir.y * 2.5 + 0.1);
     float3 warm = lerp(float3(1.0, 0.45, 0.22), float3(1.0, 0.98, 0.95), sunH);
+    [branch] if (gCloudSunlit > 0.0)
+    {
+        // Light the ice with the sunlight that actually reaches it. At 7.5 km
+        // a horizon sun still stands ~2.8 deg up, its beam reddened by the
+        // grazing path below: golden cirrus toward the sun, deepening to red
+        // where the sun sits on that cloud's own horizon.
+        float3 pc = ro + rd * t;
+        float2 sh = RaySphere(pc, lightDir, Re);
+        float lit = (sh.x > 0.0 && sh.y > 0.0) ? 0.0 : 1.0; // earth shadow
+        float3 T = exp(-Extinction(OpticalDepth(pc, lightDir, 8))) * lit;
+        warm = lerp(warm, T * 1.4, gCloudSunlit);
+    }
     float lit = 0.15 + 0.85 * pow(saturate(dot(rd, lightDir) * 0.5 + 0.5), 2.0);
     float3 cloudCol = warm * lit * intensity * 0.028 * (0.25 + saturate(lightDir.y + 0.35));
     return lerp(col, cloudCol, cov * 0.6);
@@ -243,15 +286,53 @@ float3 SunDisc(float3 rd, float3 dir, float3 discCol)
     return discCol * t * limb;
 }
 
+// Horizon sun (Sunset). Unlike the soft high-sun glow above, a sun this dim
+// shows its true limb: a crisp, limb-darkened disc, squashed vertically by
+// refraction (gSunFx.y) and graded by the steep air-mass change across it -
+// yellow-orange at the upper limb, red at the waterline (gSunTauGrad). Thin
+// turbulent layers over the sea shift each horizontal slice of it sideways
+// and back, so the limb "boils"; the effect grows toward the horizon, where
+// the line of sight is longest.
+static const float kSunDiscR = 0.00855; // rad, = kSunDiscRadiusDeg (App.cpp)
+
+float3 SunDiscLow(float3 rd, float3 dir, float3 discCol, float pixAng)
+{
+    if (dot(rd, dir) < 0.9995)
+        return 0;
+    float3 up = normalize(float3(0, 1, 0) - dir * dir.y);
+    float3 right = cross(up, dir);
+    // apparent offset from the disc centre, in disc radii (+y = up)
+    float2 lc = float2(dot(rd, right), dot(rd, up)) / kSunDiscR;
+
+    float sh = gSunFx.x;
+    float t = gTime;
+    float nearH = saturate(1.0 - lc.y); // 1 at the waterline, 0 at the top
+    float layer = lc.y * 2.6 - t * 0.35; // layers creep upward with the warm air
+    float wob = (ValueNoise(float2(layer, t * 1.6)) - 0.5)
+              + 0.5 * (ValueNoise(float2(layer * 2.3 + 5.3, t * 2.9)) - 0.5);
+    lc.x += sh * wob * (0.08 + 0.18 * nearH);
+    lc.y += sh * 0.08 * (ValueNoise(float2(lc.x * 1.8 + 1.7, t * 1.2)) - 0.5);
+
+    float r = length(float2(lc.x, lc.y / gSunFx.y)); // undo the refraction squash
+    float aa = max(pixAng / kSunDiscR, 1e-3);
+    float mask = saturate((1.0 - r) / aa + 0.5);
+    float mu = sqrt(saturate(1.0 - r * r));
+    float limb = 1.0 - 0.5 * (1.0 - mu); // limb darkening, u ~ 0.5
+    return discCol * exp(gSunTauGrad.xyz * lc.y) * limb * mask;
+}
+
 float4 PSSky(SkyVSOut i) : SV_Target
 {
     float3 rd = ViewRayFromUv(i.uv);
     float3 col = tSkyCube.SampleLevel(samLinearClamp, rd, 0).rgb;
+    float pixAng = max(length(ddx(rd)), length(ddy(rd))); // radians per pixel
 
     if (rd.y > -0.05)
     {
         if (gLightIsMoon > 0.5)
             col += MoonDisc(rd, gLightDir, gSunDiscColor);
+        else if (gSunFx.x > 0.0)
+            col += SunDiscLow(rd, gLightDir, gSunDiscColor, pixAng);
         else
             col += SunDisc(rd, gLightDir, gSunDiscColor);
 

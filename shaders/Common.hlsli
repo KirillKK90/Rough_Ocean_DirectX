@@ -31,6 +31,8 @@ cbuffer FrameCB : register(b0)
     float4 gWhirl[4];       // xy = world XZ, z = seconds since spawn (<0 off), w = peak funnel depth m
     float4 gWhirl2[4];      // x = spin-up s, y = decay s, z = peak core radius m, w = swirl gain (signed: <0 = clockwise)
     float4 gWhirl3[4];      // x = draw-in, y = reach m, z = cull radius m, w = pattern dissolve s
+    float4 gSunFx;          // x = horizon-sun shimmer 0..1 (0 = off), y = refraction flattening of the disc
+    float4 gSunTauGrad;     // xyz = optical-depth change across the disc, per radius upward
 }
 
 // Per-object constants.

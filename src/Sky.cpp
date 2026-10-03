@@ -12,6 +12,7 @@ namespace
         XMFLOAT3 sunDir; float sunI;
         XMFLOAT3 moonDir; float moonI;
         float cloudCover; float res; uint32_t mipSrc; float pad;
+        float haze; float ozone; float cloudSunlit; float pad2;
     };
 }
 
@@ -102,6 +103,9 @@ void Sky::RecordGenerate(GpuContext& ctx, const Params& params)
     cb.moonI = params.moonIntensity;
     cb.cloudCover = params.cloudCover;
     cb.res = static_cast<float>(res);
+    cb.haze = params.haze;
+    cb.ozone = params.ozone;
+    cb.cloudSunlit = params.cloudSunlit;
 
     cmd->SetComputeRootSignature(ctx.computeRS.Get());
     cmd->SetPipelineState(psoGen.Get());

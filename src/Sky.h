@@ -16,6 +16,9 @@ public:
         DirectX::XMFLOAT3 moonDir{ 0, 0.7f, 0.7f };
         float moonIntensity = 0.0f;
         float cloudCover = 0.15f;
+        float haze = 1.0f;        // aerosol (Mie) turbidity multiplier
+        float ozone = 0.0f;       // Chappuis-band absorption, 0 = off, 1 = standard column
+        float cloudSunlit = 0.0f; // 1 = cirrus lit by the sunlight transmitted to its altitude
     };
 
     void Create(GpuContext& ctx, uint32_t resolution);

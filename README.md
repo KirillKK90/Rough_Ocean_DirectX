@@ -11,6 +11,8 @@ navigation buoy that bobs on the waves.
 | Evening, sea state 4 | Morning, sea state 7 |
 | ![Night](screenshots/night_moon.png) | ![Late evening](screenshots/late_evening_ui.png) |
 | Night (moonlight), sea state 6 | Late evening + control panel |
+| ![Sunset](screenshots/sunset.png) | |
+| Sunset, sea state 3 | |
 | ![Meteorite](screenshots/meteor_streak.png) | ![Impact rings](screenshots/meteor_rings.png) |
 | Meteorite falling toward the water | Impact rings spreading past the buoy |
 
@@ -33,6 +35,19 @@ navigation buoy that bobs on the waves.
   (cached — regenerated only when the time of day changes), analytic sun disc,
   procedural moon with mare, hash-based star field, optional cirrus layer.
   The same cubemap lights the ocean and buoy (reflections + ambient)
+- **Sunset**: the sun sits half below the horizon, its light crossing ~40 air
+  masses of hazy maritime air. The reddening is physical, not a filter: the
+  same atmosphere gains spectral aerosol haze (Angstrom exponent 1.3) and an
+  ozone layer (Chappuis-band absorption), and the sun's colour is integrated
+  through that atmosphere, so sky, sun, sea reflections, glints, foam and the
+  buoy all turn red-orange together. The disc is refraction-flattened, graded
+  from a yellow-orange upper limb to a red waterline by the air-mass change
+  across it, and its limb "boils" in the turbulent air; cirrus is lit by the
+  sunlight that reaches its altitude. On the water, glints are bounded by the
+  disc they reflect (they stay orange instead of clipping to yellow), the sun
+  path twinkles with footprint-matched capillary glitter, backlit crests
+  transmit ember-red light through their thin tops, and the light scintillates
+  by a few percent
 - **Buoy**: procedural mesh; buoyancy physics (heave spring + tilt inertia + anchored
   sway) driven by GPU→CPU readback of the displacement maps; alternating red/green
   flashing lamp with an HDR glow billboard and a point light on the surrounding water
@@ -106,13 +121,13 @@ Studio and build/run from there.
   left half of the view and it streaks in from the right of the sky; click the
   right half and it comes from the left
 - **W A S D / Q E** — move (Shift = fast, mouse wheel = speed)
-- **1..7** — time of day presets
+- **1..8** — time of day presets
 - **M** — launch a meteorite at a random spot ahead (same as the UI button)
 - **Esc** — quit
 
 The on-screen panel exposes: **Level of detail** (Low / Medium / High / Ultra),
-**Time of day** (early morning, morning, noon, afternoon, evening, late evening,
-night), **Sea state** (0 glassy … 9 severe storm), wind direction, wave height,
+**Time of day** (early morning, morning, noon, afternoon, evening, sunset,
+late evening, night), **Sea state** (0 glassy … 9 severe storm), wind direction, wave height,
 choppiness, foam amount, wave speed, exposure, bloom, cirrus cloud cover,
 FXAA/VSync toggles, the buoy's flash timing/intensity, and the ocean sound
 (mode Off / Soothing / Realistic + volume; loudness itself follows the sea
@@ -136,7 +151,7 @@ All levels are far above the 25–30 FPS target on an integrated Intel Iris Xe
 --w N --h N        window size (default 1600x900)
 --lod 0..3         level of detail (default 2 = High)
 --sea 0..9         sea state (default 4)
---time 0..6        time of day (default 4 = evening)
+--time 0..7        time of day (default 4 = evening, 5 = sunset)
 --frames N         benchmark: render N frames, print average FPS, exit
 --screenshot PATH  save a PNG at the end of a benchmark run
 --ui               keep the UI visible in benchmark screenshots

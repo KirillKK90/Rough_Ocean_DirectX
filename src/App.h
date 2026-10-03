@@ -18,7 +18,7 @@ struct LaunchOptions
     uint32_t width = 1600, height = 900;
     int lod = 2;      // 0 Low, 1 Medium, 2 High, 3 Ultra
     int seaState = 4; // 0..9
-    int timeOfDay = 4; // index into time presets (4 = Evening)
+    int timeOfDay = 4; // index into time presets (4 = Evening, 5 = Sunset)
     bool vsync = true;
     int benchFrames = 0;          // if > 0: render N frames, report FPS, exit
     std::string screenshotPath;   // optional PNG capture in bench mode
@@ -69,6 +69,8 @@ private:
         DirectX::XMFLOAT4 whirl[Whirlpool::kMaxActive];
         DirectX::XMFLOAT4 whirl2[Whirlpool::kMaxActive];
         DirectX::XMFLOAT4 whirl3[Whirlpool::kMaxActive];
+        DirectX::XMFLOAT4 sunFx;      // x = horizon shimmer, y = refraction flattening
+        DirectX::XMFLOAT4 sunTauGrad; // xyz = disc optical-depth change per radius upward
     };
 
     void InitWindow(HINSTANCE hInst);
@@ -142,6 +144,9 @@ private:
     DirectX::XMFLOAT3 sunDiscColor{ 100, 100, 95 };
     float lightIsMoon = 0.0f;
     float starIntensity = 0.0f;
+    float sunShimmer = 0.0f;  // 0 except for a horizon sun (Sunset)
+    float sunFlatten = 1.0f;
+    DirectX::XMFLOAT3 sunTauGrad{ 0, 0, 0 };
     float exposureBase = 1.0f;
     float ampEstimate = 0.8f;
 

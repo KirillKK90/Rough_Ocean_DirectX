@@ -49,6 +49,55 @@ float CascadeLod(float dist, float invL)
     return log2(max(dist * gGridScale * gCascade1.w * invL, 1.0));
 }
 
+// ---------------------------------------------------------------------------
+// Horizon-sun glitter shimmer (Sunset only, gSunFx.x > 0).
+// A real sun path is made of countless capillary facets that flash and die
+// far faster than the resolved waves change. The filtered maps average them,
+// correctly, into a smooth sheen - right on average, but static. This puts the
+// averaged-away variance back as a mean-1 random modulation of the sun
+// specular: cells matched to the pixel footprint along and across the sun
+// path (so the path breaks into the familiar horizontal dashes, never finer
+// than ~2 px, never per-pixel noise), each cell flaring and fading in place.
+// ---------------------------------------------------------------------------
+// A value-noise field that evolves in place is a blend of two random slices;
+// this picks the slice offsets (xy, zw) and blend weight for time t.
+void GlitterSlices(float t, float seed, out float4 o, out float f)
+{
+    float k = floor(t);
+    f = smoothstep(0.0, 1.0, t - k);
+    o = float4(Hash12(float2(k, seed)), Hash12(float2(seed, k)),
+               Hash12(float2(k + 1.0, seed)), Hash12(float2(seed, k + 1.0))) * 97.0;
+}
+
+// Two independent twinkling fields beat against each other; E = 0.5 * 0.5.
+float GlitterCell(float2 p, float4 oa, float fa, float4 ob, float fb)
+{
+    float a = lerp(ValueNoise(p + oa.xy), ValueNoise(p + oa.zw), fa);
+    float2 q = p * 1.31 + 7.7;
+    float b = lerp(ValueNoise(q + ob.xy), ValueNoise(q + ob.zw), fb);
+    return a * b * 4.0;
+}
+
+// uv: position in a sun-aligned frame (m); fp: pixel footprint along each axis (m).
+float GlitterShimmer(float2 uv, float2 fp, float t)
+{
+    float4 oa, ob;
+    float fa, fb;
+    GlitterSlices(t * 1.7, 3.0, oa, fa);
+    GlitterSlices(t * 2.3, 11.0, ob, fb);
+
+    const float c = 0.3; // capillary cell size, m
+    float2 lod = log2(max(fp * 2.0 / c, 1.0));
+    float2 l0 = floor(lod);
+    float2 f = lod - l0;
+    float2 c0 = c * exp2(l0);
+    float s00 = GlitterCell(uv / c0, oa, fa, ob, fb);
+    float s10 = GlitterCell(uv / (c0 * float2(2, 1)) + 31.0, oa, fa, ob, fb);
+    float s01 = GlitterCell(uv / (c0 * float2(1, 2)) + 57.0, oa, fa, ob, fb);
+    float s11 = GlitterCell(uv / (c0 * 2.0) + 92.0, oa, fa, ob, fb);
+    return lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y);
+}
+
 VSOut VSOcean(VSIn v)
 {
     VSOut o;
@@ -280,6 +329,20 @@ float4 PSOcean(VSOut i) : SV_Target
     float Fs = f0 + (1.0 - f0) * pow(1.0 - VdH, 5.0);
     float3 spec = D_GGX(NdH, alpha) * V_SmithApprox(NdL, NdV, alpha) * Fs * NdL * gLightColor;
     spec = min(spec, 60.0); // tame residual fireflies (filtering does the real work)
+    // Sun-aligned frame and its footprint, in uniform flow (derivatives).
+    float2 sunAz = normalize(gLightDir.xz + float2(0.0, 1e-5));
+    float2 sunUV = float2(dot(i.worldXZ, sunAz), dot(i.worldXZ, float2(-sunAz.y, sunAz.x)));
+    float2 sunFp = float2(length(float2(ddx(sunUV.x), ddy(sunUV.x))),
+                        length(float2(ddx(sunUV.y), ddy(sunUV.y))));
+    [branch] if (gSunFx.x > 0.0)
+    {
+        // A mirror facet cannot outshine the disc it reflects: bound each
+        // glint by F x disc radiance. The reddened horizon sun is dim, so its
+        // glitter stays the sun's own orange instead of clipping to yellow.
+        spec = min(spec, Fs * gSunDiscColor * 1.6);
+        [branch] if (spec.r > 0.01) // only glints bright enough to see twinkle
+            spec *= lerp(1.0, GlitterShimmer(sunUV, sunFp, gTime), 0.75 * gSunFx.x);
+    }
 
     // --- Water body: ambient-lit deep color + subsurface scattering ---
     float3 ambient = tSky.SampleLevel(samLinearClamp, float3(0, 1, 0), 4.0).rgb;
@@ -300,7 +363,16 @@ float4 PSOcean(VSOut i) : SV_Target
     // off toward a white point (luminance-preserving): dim foam at low sun is
     // left essentially untouched, while bright foam is pulled back into the
     // responsive part of the tonemap so the whitecaps keep their wave shape.
-    float3 foamIrr = NdL * gLightColor * (1.0 / PI) + ambient;
+    float3 foamAmb = ambient;
+    [branch] if (gSunFx.x > 0.0)
+    {
+        // A horizon sun lights the sky from the side: the bright glow over the
+        // sunset falls on foam facing it, only the dim zenith on the rest. So
+        // light the foam by the sky around its own facing, not the zenith alone.
+        float3 nAmb = tSky.SampleLevel(samLinearClamp, normalize(float3(N.x, max(N.y, 0.05), N.z)), 5.0).rgb;
+        foamAmb = lerp(ambient, 0.5 * (ambient + nAmb), gSunFx.x);
+    }
+    float3 foamIrr = NdL * gLightColor * (1.0 / PI) + foamAmb;
     const float foamWhite = 3.0; // irradiance roll-off white point
     float foamLum = dot(foamIrr, float3(0.2126, 0.7152, 0.0722));
     float3 foamCol = 0.75 * foamIrr / (1.0 + foamLum / foamWhite);

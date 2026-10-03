@@ -141,6 +141,8 @@ namespace
         float sunElev, sunAz;   // degrees; azimuth 0 = straight ahead (+Z)
         float moonElev, moonAz;
         float exposure;
+        float haze = 1.0f;      // aerosol (Mie) turbidity multiplier
+        float lowSun = 0.0f;    // horizon-sun optics: ozone, refraction, scintillation
     };
     const TimePreset kTimes[] = {
         { "Early morning", 3.5f, 14.0f, -40.0f, 0.0f, 1.35f },
@@ -148,10 +150,17 @@ namespace
         { "Noon", 62.0f, 20.0f, -40.0f, 0.0f, 0.75f },
         { "Afternoon", 35.0f, -26.0f, -40.0f, 0.0f, 0.85f },
         { "Evening", 8.0f, 8.0f, -40.0f, 0.0f, 1.25f },
+        // Disc centre on the horizon: half the sun has set. Its light crosses
+        // ~40 air masses of hazy maritime air, which is where the red comes from.
+        { "Sunset", 0.0f, 3.0f, -40.0f, 0.0f, 0.8f, 3.0f, 1.0f },
         { "Late evening", -5.5f, 5.0f, 21.0f, -22.0f, 3.0f },
         { "Night", -30.0f, 0.0f, 43.0f, 12.0f, 5.0f },
     };
     constexpr int kNumTimes = int(std::size(kTimes));
+
+    // Apparent radius of the drawn sun disc (Sky.hlsl kSunDiscR), degrees.
+    // Twice the real 0.27 deg, matching the soft disc of the other presets.
+    constexpr float kSunDiscRadiusDeg = 0.49f;
 
     struct SeaPreset
     {
@@ -205,6 +214,56 @@ namespace
             m = 1.0f / (std::cos(XMConvertToRadians(z)) + 0.15f * std::pow(93.885f - z, -1.253f));
         const XMFLOAT3 ext(0.062f, 0.130f, 0.300f);
         return XMFLOAT3(std::exp(-m * ext.x), std::exp(-m * ext.y), std::exp(-m * ext.z));
+    }
+
+    // Extinction the clear-sky Transmittance() leaves out, integrated through
+    // the same spherical atmosphere Sky.hlsl marches (so the sun and the sky
+    // around it redden together): aerosol beyond the baseline haze ((haze - 1)
+    // x BetaM, 1.2 km scale height, Angstrom exponent 1.3 = Sky.hlsl
+    // kHazeSpectrum) and ozone's Chappuis band (tent layer at 10-40 km). Both
+    // are negligible for a high sun; at the horizon the path through them is
+    // hundreds of kilometres long.
+    XMFLOAT3 ExtraTransmittance(float elevDeg, float haze, float ozone)
+    {
+        if (haze <= 1.0f && ozone <= 0.0f)
+            return XMFLOAT3(1.0f, 1.0f, 1.0f);
+        const double Re = 6371e3, Ra = 6431e3, Hm = 1200.0;
+        const double hazeSpectrum[3] = { 0.76, 1.0, 1.34 };
+        const double betaM = 4.5e-6 * 1.1 * (haze - 1.0);
+        const double betaO[3] = { 0.650e-6 * ozone, 1.881e-6 * ozone, 0.085e-6 * ozone };
+        double e = XMConvertToRadians(std::max(elevDeg, 0.0f));
+        double dx = std::cos(e), dy = std::sin(e);
+        double oy = Re + 30.0; // eye height of the sky march
+        double b = oy * dy;
+        double tMax = -b + std::sqrt(b * b - (oy * oy - Ra * Ra));
+        const int kSteps = 2000;
+        double dt = tMax / kSteps, odM = 0.0, odO = 0.0;
+        for (int i = 0; i < kSteps; ++i)
+        {
+            double t = (i + 0.5) * dt;
+            double px = dx * t, py = oy + dy * t;
+            double h = std::sqrt(px * px + py * py) - Re;
+            odM += std::exp(-h / Hm) * dt;
+            odO += std::max(0.0, 1.0 - std::abs(h - 25000.0) / 15000.0) * dt;
+        }
+        return XMFLOAT3(float(std::exp(-betaM * hazeSpectrum[0] * odM - betaO[0] * odO)),
+                        float(std::exp(-betaM * hazeSpectrum[1] * odM - betaO[1] * odO)),
+                        float(std::exp(-betaM * hazeSpectrum[2] * odM - betaO[2] * odO)));
+    }
+
+    XMFLOAT3 Mul(XMFLOAT3 a, XMFLOAT3 b) { return XMFLOAT3(a.x * b.x, a.y * b.y, a.z * b.z); }
+
+    // Fraction of a disc of angular radius r whose centre sits e above the horizon.
+    float DiscVisibleFraction(float e, float r)
+    {
+        float x = std::clamp(e / r, -1.0f, 1.0f);
+        return 1.0f - (std::acos(x) - x * std::sqrt(1.0f - x * x)) / XM_PI;
+    }
+
+    // Bennett's astronomical refraction for an apparent elevation h, degrees.
+    float RefractionDeg(float h)
+    {
+        return 1.0f / (60.0f * std::tan(XMConvertToRadians(h + 7.31f / (h + 4.4f))));
     }
 
     LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -512,18 +571,43 @@ void App::UpdateLighting()
     const TimePreset& tp = kTimes[uiTimeOfDay];
     XMFLOAT3 sunDir = DirFromElevAz(tp.sunElev, tp.sunAz);
     XMFLOAT3 moonDir = DirFromElevAz(tp.moonElev, tp.moonAz);
-    bool moonPrimary = tp.sunElev < 1.0f;
+    // The moon takes over only once the whole sun disc is below the horizon.
+    bool moonPrimary = tp.sunElev < -kSunDiscRadiusDeg;
 
-    XMFLOAT3 tSun = Transmittance(tp.sunElev);
+    XMFLOAT3 tSun = Mul(Transmittance(tp.sunElev), ExtraTransmittance(tp.sunElev, tp.haze, tp.lowSun));
     XMFLOAT3 tMoon = Transmittance(tp.moonElev);
+
+    sunShimmer = 0.0f;
+    sunFlatten = 1.0f;
+    sunTauGrad = XMFLOAT3(0.0f, 0.0f, 0.0f);
 
     const float sunPower = 24.0f;
     if (!moonPrimary)
     {
         lightDir = sunDir;
         lightIsMoon = 0.0f;
-        lightColor = XMFLOAT3(sunPower * tSun.x, sunPower * tSun.y, sunPower * tSun.z);
-        sunDiscColor = XMFLOAT3(420.0f * tSun.x, 415.0f * tSun.y, 405.0f * tSun.z);
+        // A sun cut by the horizon lights the sea with only its visible part.
+        float vis = DiscVisibleFraction(tp.sunElev, kSunDiscRadiusDeg);
+        lightColor = XMFLOAT3(sunPower * vis * tSun.x, sunPower * vis * tSun.y, sunPower * vis * tSun.z);
+        // At the horizon the disc is dimmed so far that it is exposed close to
+        // the sky around it: a golden-orange disc, not a clipped white blob.
+        float disc = 1.0f + (0.35f - 1.0f) * tp.lowSun;
+        sunDiscColor = XMFLOAT3(420.0f * disc * tSun.x, 415.0f * disc * tSun.y, 405.0f * disc * tSun.z);
+
+        if (tp.lowSun > 0.0f)
+        {
+            // Refraction lifts the lower limb more than the upper one: the
+            // apparent disc is squashed vertically by 1 - dR/dh.
+            float r = kSunDiscRadiusDeg;
+            sunFlatten = 1.0f - (RefractionDeg(tp.sunElev) - RefractionDeg(tp.sunElev + r)) / r;
+            // Air mass falls steeply across the disc: its upper limb shines
+            // brighter and yellower than the red lower edge. Optical-depth
+            // change per disc radius, upward.
+            XMFLOAT3 tUp = Mul(Transmittance(tp.sunElev + r), ExtraTransmittance(tp.sunElev + r, tp.haze, tp.lowSun));
+            auto dTau = [](float up, float c) { return std::log(std::max(up, 1e-30f) / std::max(c, 1e-30f)); };
+            sunTauGrad = XMFLOAT3(dTau(tUp.x, tSun.x), dTau(tUp.y, tSun.y), dTau(tUp.z, tSun.z));
+            sunShimmer = tp.lowSun;
+        }
     }
     else
     {
@@ -540,6 +624,9 @@ void App::UpdateLighting()
     skyParams.moonDir = moonDir;
     skyParams.moonIntensity = moonPrimary ? 0.9f : 0.0f;
     skyParams.cloudCover = uiCloudCover;
+    skyParams.haze = tp.haze;
+    skyParams.ozone = tp.lowSun;
+    skyParams.cloudSunlit = tp.lowSun;
 
     starIntensity = std::clamp((-tp.sunElev - 3.0f) / 6.0f, 0.0f, 1.0f);
     exposureBase = tp.exposure;
@@ -670,9 +757,22 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     cb.lightIsMoon = lightIsMoon;
     cb.lightDir = lightDir;
     cb.starIntensity = starIntensity;
-    cb.lightColor = lightColor;
+    // Scintillation: a horizon sun is seen through ~40 air masses of turbulent
+    // air, so its light breathes by a few percent. Incommensurate slow tones,
+    // on sim time so verification runs stay deterministic.
+    float twinkle = 1.0f;
+    if (sunShimmer > 0.0f)
+    {
+        float n = 0.5f * std::sin(2.31f * simTime + 1.3f)
+                + 0.3f * std::sin(5.17f * simTime + 0.4f)
+                + 0.2f * std::sin(10.7f * simTime + 2.1f);
+        twinkle = 1.0f + 0.035f * sunShimmer * n;
+    }
+    cb.lightColor = XMFLOAT3(lightColor.x * twinkle, lightColor.y * twinkle, lightColor.z * twinkle);
     cb.roughBase = 0.055f;
-    cb.sunDiscColor = sunDiscColor;
+    cb.sunDiscColor = XMFLOAT3(sunDiscColor.x * twinkle, sunDiscColor.y * twinkle, sunDiscColor.z * twinkle);
+    cb.sunFx = XMFLOAT4(sunShimmer, sunFlatten, 0.0f, 0.0f);
+    cb.sunTauGrad = XMFLOAT4(sunTauGrad.x, sunTauGrad.y, sunTauGrad.z, 0.0f);
     cb.lambda = oceanParams.choppiness;
 
     float wf = std::clamp(oceanParams.U10 / 12.0f, 0.05f, 1.2f);
@@ -683,6 +783,18 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     cb.waterDeep = XMFLOAT3(0.003f, 0.013f, 0.026f);
     cb.foamAmount = 1.0f;
     cb.waterScatter = XMFLOAT3(0.010f, 0.062f, 0.080f);
+    if (sunShimmer > 0.0f)
+    {
+        // A horizon sun shines sideways through the thin crest tops (~0.6 m of
+        // water) rather than down a long scattering path, so far less of its
+        // red is absorbed: pure-water absorption 0.45 / 0.064 / 0.0065 per m
+        // at 680 / 550 / 440 nm. Backlit crests glow ember-red.
+        const XMFLOAT3 thin(0.080f * std::exp(-0.45f * 0.6f), 0.080f * std::exp(-0.064f * 0.6f),
+                            0.080f * std::exp(-0.0065f * 0.6f));
+        cb.waterScatter = XMFLOAT3(cb.waterScatter.x + (thin.x - cb.waterScatter.x) * sunShimmer,
+                                   cb.waterScatter.y + (thin.y - cb.waterScatter.y) * sunShimmer,
+                                   cb.waterScatter.z + (thin.z - cb.waterScatter.z) * sunShimmer);
+    }
     cb.sss = 0.45f;
 
     XMFLOAT3 lamp = buoy.LampWorldPos();
