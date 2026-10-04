@@ -11,8 +11,8 @@ navigation buoy that bobs on the waves.
 | Evening, sea state 4 | Morning, sea state 7 |
 | ![Night](screenshots/night_moon.png) | ![Late evening](screenshots/late_evening_ui.png) |
 | Night (moonlight), sea state 6 | Late evening + control panel |
-| ![Sunset](screenshots/sunset.png) | |
-| Sunset, sea state 3 | |
+| ![Sunset](screenshots/sunset.png) | ![Earth's shadow](screenshots/sunset_shadow.png) |
+| Sunset, sea state 3 | Sunset, looking away from the sun: Earth's shadow |
 | ![Meteorite](screenshots/meteor_streak.png) | ![Impact rings](screenshots/meteor_rings.png) |
 | Meteorite falling toward the water | Impact rings spreading past the buoy |
 
@@ -37,10 +37,15 @@ navigation buoy that bobs on the waves.
   The same cubemap lights the ocean and buoy (reflections + ambient)
 - **Sunset**: the sun sits half below the horizon, its light crossing ~40 air
   masses of hazy maritime air. The reddening is physical, not a filter: the
-  same atmosphere gains spectral aerosol haze (Angstrom exponent 1.3) and an
-  ozone layer (Chappuis-band absorption), and the sun's colour is integrated
-  through that atmosphere, so sky, sun, sea reflections, glints, foam and the
-  buoy all turn red-orange together. The disc is refraction-flattened, graded
+  same atmosphere gains spectral aerosol haze (Angstrom exponent 1.3), a haze
+  layer aloft (~4 km) and an ozone layer (Chappuis-band absorption), the sky
+  adds multiple scattering (Hillaire 2020: a 32x32 LUT built in a compute
+  pass), and the sun's colour is integrated through that atmosphere, so sky,
+  sun, sea reflections, glints, foam and the buoy all turn red-orange
+  together. Opposite the sun the sky is dusky, as it should be: the light that
+  reaches that air skims the planet through the haze, so the Earth's shadow
+  darkens the horizon, under a dim pink anti-twilight arch (the Belt of
+  Venus) and a violet sky fed by multiply scattered light. The disc is refraction-flattened, graded
   from a yellow-orange upper limb to a red waterline by the air-mass change
   across it, and its limb "boils" in the turbulent air; cirrus is lit by the
   sunlight that reaches its altitude. On the water, glints are bounded by the

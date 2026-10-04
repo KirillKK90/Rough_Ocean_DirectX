@@ -392,7 +392,13 @@ float4 PSOcean(VSOut i) : SV_Target
     }
 
     // --- Aerial perspective toward the horizon ---
-    float3 horizonCol = tSky.SampleLevel(samLinearClamp, normalize(float3(E.x, 0.015, E.z)), 1.5).rgb;
+    // The far sea fades into the sky it meets. Under a horizon sun the sky
+    // opposite it darkens steeply toward the waterline (the Earth's shadow),
+    // so take the haze colour right at the horizon there: sampled ~1 deg up,
+    // the distant sea would glow brighter than the sky directly above it.
+    float hzY = lerp(0.015, 0.0045, gSunFx.x);
+    float hzMip = lerp(1.5, 0.5, gSunFx.x);
+    float3 horizonCol = tSky.SampleLevel(samLinearClamp, normalize(float3(E.x, hzY, E.z)), hzMip).rgb;
     float fog = 1.0 - exp(-dist * gFogDensity);
     col = lerp(col, horizonCol, fog);
 

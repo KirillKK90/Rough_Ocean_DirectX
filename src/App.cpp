@@ -142,7 +142,9 @@ namespace
         float moonElev, moonAz;
         float exposure;
         float haze = 1.0f;      // aerosol (Mie) turbidity multiplier
-        float lowSun = 0.0f;    // horizon-sun optics: ozone, refraction, scintillation
+        float lowSun = 0.0f;    // horizon-sun optics: ozone, refraction, scintillation,
+                                // multiple scattering in the sky
+        float aloft = 0.0f;     // haze layer aloft (~4 km): peak scattering at 550 nm, 1/m
     };
     const TimePreset kTimes[] = {
         { "Early morning", 3.5f, 14.0f, -40.0f, 0.0f, 1.35f },
@@ -151,8 +153,11 @@ namespace
         { "Afternoon", 35.0f, -26.0f, -40.0f, 0.0f, 0.85f },
         { "Evening", 8.0f, 8.0f, -40.0f, 0.0f, 1.25f },
         // Disc centre on the horizon: half the sun has set. Its light crosses
-        // ~40 air masses of hazy maritime air, which is where the red comes from.
-        { "Sunset", 0.0f, 3.0f, -40.0f, 0.0f, 0.8f, 3.0f, 1.0f },
+        // ~40 air masses of hazy maritime air, which is where the red comes
+        // from. A haze layer aloft (~4 km, AOD 0.06; ~0.08 in all, typical
+        // over the sea) keeps the sky opposite the sun dusky: the light that
+        // reaches it skims the planet straight through that layer.
+        { "Sunset", 0.0f, 3.0f, -40.0f, 0.0f, 0.8f, 3.0f, 1.0f, 2.0e-5f },
         { "Late evening", -5.5f, 5.0f, 21.0f, -22.0f, 3.0f },
         { "Night", -30.0f, 0.0f, 43.0f, 12.0f, 5.0f },
     };
@@ -220,16 +225,20 @@ namespace
     // the same spherical atmosphere Sky.hlsl marches (so the sun and the sky
     // around it redden together): aerosol beyond the baseline haze ((haze - 1)
     // x BetaM, 1.2 km scale height, Angstrom exponent 1.3 = Sky.hlsl
-    // kHazeSpectrum) and ozone's Chappuis band (tent layer at 10-40 km). Both
-    // are negligible for a high sun; at the horizon the path through them is
-    // hundreds of kilometres long.
-    XMFLOAT3 ExtraTransmittance(float elevDeg, float haze, float ozone)
+    // kHazeSpectrum), the haze layer aloft (Gaussian about 4 km, Angstrom 1.0
+    // = Sky.hlsl AloftDensity / kAloftSpectrum) and ozone's Chappuis band
+    // (tent layer at 10-40 km). All are negligible for a high sun; at the
+    // horizon the path through them is hundreds of kilometres long.
+    XMFLOAT3 ExtraTransmittance(float elevDeg, const TimePreset& tp)
     {
-        if (haze <= 1.0f && ozone <= 0.0f)
+        const float haze = tp.haze, ozone = tp.lowSun, aloft = tp.aloft;
+        if (haze <= 1.0f && ozone <= 0.0f && aloft <= 0.0f)
             return XMFLOAT3(1.0f, 1.0f, 1.0f);
         const double Re = 6371e3, Ra = 6431e3, Hm = 1200.0;
         const double hazeSpectrum[3] = { 0.76, 1.0, 1.34 };
+        const double aloftSpectrum[3] = { 0.81, 1.0, 1.25 };
         const double betaM = 4.5e-6 * 1.1 * (haze - 1.0);
+        const double betaF = 1.1 * double(aloft);
         const double betaO[3] = { 0.650e-6 * ozone, 1.881e-6 * ozone, 0.085e-6 * ozone };
         double e = XMConvertToRadians(std::max(elevDeg, 0.0f));
         double dx = std::cos(e), dy = std::sin(e);
@@ -237,18 +246,22 @@ namespace
         double b = oy * dy;
         double tMax = -b + std::sqrt(b * b - (oy * oy - Ra * Ra));
         const int kSteps = 2000;
-        double dt = tMax / kSteps, odM = 0.0, odO = 0.0;
+        double dt = tMax / kSteps, odM = 0.0, odO = 0.0, odF = 0.0;
         for (int i = 0; i < kSteps; ++i)
         {
             double t = (i + 0.5) * dt;
             double px = dx * t, py = oy + dy * t;
             double h = std::sqrt(px * px + py * py) - Re;
             odM += std::exp(-h / Hm) * dt;
+            double xa = (h - 4000.0) / 1500.0;
+            odF += std::exp(-xa * xa) * dt;
             odO += std::max(0.0, 1.0 - std::abs(h - 25000.0) / 15000.0) * dt;
         }
-        return XMFLOAT3(float(std::exp(-betaM * hazeSpectrum[0] * odM - betaO[0] * odO)),
-                        float(std::exp(-betaM * hazeSpectrum[1] * odM - betaO[1] * odO)),
-                        float(std::exp(-betaM * hazeSpectrum[2] * odM - betaO[2] * odO)));
+        auto T = [&](int c)
+        {
+            return float(std::exp(-betaM * hazeSpectrum[c] * odM - betaF * aloftSpectrum[c] * odF - betaO[c] * odO));
+        };
+        return XMFLOAT3(T(0), T(1), T(2));
     }
 
     XMFLOAT3 Mul(XMFLOAT3 a, XMFLOAT3 b) { return XMFLOAT3(a.x * b.x, a.y * b.y, a.z * b.z); }
@@ -574,7 +587,7 @@ void App::UpdateLighting()
     // The moon takes over only once the whole sun disc is below the horizon.
     bool moonPrimary = tp.sunElev < -kSunDiscRadiusDeg;
 
-    XMFLOAT3 tSun = Mul(Transmittance(tp.sunElev), ExtraTransmittance(tp.sunElev, tp.haze, tp.lowSun));
+    XMFLOAT3 tSun = Mul(Transmittance(tp.sunElev), ExtraTransmittance(tp.sunElev, tp));
     XMFLOAT3 tMoon = Transmittance(tp.moonElev);
 
     sunShimmer = 0.0f;
@@ -589,10 +602,10 @@ void App::UpdateLighting()
         // A sun cut by the horizon lights the sea with only its visible part.
         float vis = DiscVisibleFraction(tp.sunElev, kSunDiscRadiusDeg);
         lightColor = XMFLOAT3(sunPower * vis * tSun.x, sunPower * vis * tSun.y, sunPower * vis * tSun.z);
-        // At the horizon the disc is dimmed so far that it is exposed close to
-        // the sky around it: a golden-orange disc, not a clipped white blob.
-        float disc = 1.0f + (0.35f - 1.0f) * tp.lowSun;
-        sunDiscColor = XMFLOAT3(420.0f * disc * tSun.x, 415.0f * disc * tSun.y, 405.0f * disc * tSun.z);
+        // A horizon sun needs no special exposure: the hazy air dims and
+        // reddens its disc to about the sky around it, so it shows as an
+        // orange disc graded to red at the waterline, not a clipped white blob.
+        sunDiscColor = XMFLOAT3(420.0f * tSun.x, 415.0f * tSun.y, 405.0f * tSun.z);
 
         if (tp.lowSun > 0.0f)
         {
@@ -603,7 +616,7 @@ void App::UpdateLighting()
             // Air mass falls steeply across the disc: its upper limb shines
             // brighter and yellower than the red lower edge. Optical-depth
             // change per disc radius, upward.
-            XMFLOAT3 tUp = Mul(Transmittance(tp.sunElev + r), ExtraTransmittance(tp.sunElev + r, tp.haze, tp.lowSun));
+            XMFLOAT3 tUp = Mul(Transmittance(tp.sunElev + r), ExtraTransmittance(tp.sunElev + r, tp));
             auto dTau = [](float up, float c) { return std::log(std::max(up, 1e-30f) / std::max(c, 1e-30f)); };
             sunTauGrad = XMFLOAT3(dTau(tUp.x, tSun.x), dTau(tUp.y, tSun.y), dTau(tUp.z, tSun.z));
             sunShimmer = tp.lowSun;
@@ -627,6 +640,8 @@ void App::UpdateLighting()
     skyParams.haze = tp.haze;
     skyParams.ozone = tp.lowSun;
     skyParams.cloudSunlit = tp.lowSun;
+    skyParams.aloft = tp.aloft;
+    skyParams.multiScatter = tp.lowSun;
 
     starIntensity = std::clamp((-tp.sunElev - 3.0f) / 6.0f, 0.0f, 1.0f);
     exposureBase = tp.exposure;
@@ -1034,6 +1049,10 @@ void App::BuildUi(float dt)
         requestFullscreenToggle = true;
     if (fullscreenPushed)
         ImGui::PopStyleColor(3);
+    ImGui::SameLine();
+    // Same exit as Esc: the main loop sees WM_QUIT once this frame is done.
+    if (ImGui::Button("EXIT"))
+        PostQuitMessage(0);
     ImGui::Separator();
 
     // Applied to every section header below, this frame only.

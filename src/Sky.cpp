@@ -13,6 +13,7 @@ namespace
         XMFLOAT3 moonDir; float moonI;
         float cloudCover; float res; uint32_t mipSrc; float pad;
         float haze; float ozone; float cloudSunlit; float pad2;
+        float aloft; float multiScatter; float pad3[2];
     };
 }
 
@@ -66,11 +67,33 @@ void Sky::Create(GpuContext& ctx, uint32_t resolution)
     u0.Texture2DArray.ArraySize = 6;
     ctx.Dev()->CreateUnorderedAccessView(cube.Get(), nullptr, &u0, ctx.SrvCpu(DescSlot::SkyGenUav));
 
+    // Multiple-scattering LUT. Each view goes into both slots of its pair, so
+    // a table bound at the pair's start reaches it as register 3.
+    msLut = ctx.CreateTexture2D(kMsLutSize, kMsLutSize, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        1, 1, L"SkyMsLut");
+    msInSrvState = false;
+    for (uint32_t k = 0; k < 2; ++k)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC lu = {};
+        lu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        lu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        ctx.Dev()->CreateUnorderedAccessView(msLut.Get(), nullptr, &lu, ctx.SrvCpu(DescSlot::SkyMsUav + k));
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC ls = {};
+        ls.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        ls.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        ls.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        ls.Texture2D.MipLevels = 1;
+        ctx.Dev()->CreateShaderResourceView(msLut.Get(), &ls, ctx.SrvCpu(DescSlot::SkyMsSrv + k));
+    }
+
     if (!psoGen)
     {
         std::wstring file = ctx.ShaderPath(L"Sky.hlsl");
         psoGen = ctx.CreateComputePso(ctx.CompileShader(file, "CSSkyGen", "cs_5_0").Get(), L"SkyGen");
         psoMip = ctx.CreateComputePso(ctx.CompileShader(file, "CSSkyMip", "cs_5_0").Get(), L"SkyMip");
+        psoMs = ctx.CreateComputePso(ctx.CompileShader(file, "CSMsLut", "cs_5_0").Get(), L"SkyMsLut");
 
         ComPtr<ID3DBlob> vs = ctx.CompileShader(file, "VSSky", "vs_5_0");
         ComPtr<ID3DBlob> ps = ctx.CompileShader(file, "PSSky", "ps_5_0");
@@ -106,13 +129,31 @@ void Sky::RecordGenerate(GpuContext& ctx, const Params& params)
     cb.haze = params.haze;
     cb.ozone = params.ozone;
     cb.cloudSunlit = params.cloudSunlit;
+    cb.aloft = params.aloft;
+    cb.multiScatter = params.multiScatter;
 
     cmd->SetComputeRootSignature(ctx.computeRS.Get());
-    cmd->SetPipelineState(psoGen.Get());
     void* p = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS va = ctx.AllocUpload(sizeof(SkyCB), &p);
     memcpy(p, &cb, sizeof(SkyCB));
     cmd->SetComputeRootConstantBufferView(0, va);
+
+    // The multiple-scattering LUT depends only on the atmosphere, not on the
+    // view: rebuild it first, then the cube march samples it.
+    if (params.multiScatter > 0.0f)
+    {
+        if (msInSrvState)
+            ctx.Transition(msLut.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->SetPipelineState(psoMs.Get());
+        cmd->SetComputeRootDescriptorTable(6, ctx.SrvGpu(DescSlot::SkyMsUav));
+        cmd->Dispatch(kMsLutSize, kMsLutSize, 1);
+        ctx.Transition(msLut.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        msInSrvState = true;
+    }
+
+    cmd->SetPipelineState(psoGen.Get());
+    if (msInSrvState)
+        cmd->SetComputeRootDescriptorTable(5, ctx.SrvGpu(DescSlot::SkyMsSrv));
     cmd->SetComputeRootDescriptorTable(6, ctx.SrvGpu(DescSlot::SkyGenUav));
     cmd->Dispatch((res + 7) / 8, (res + 7) / 8, 6);
 

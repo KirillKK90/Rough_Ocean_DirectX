@@ -37,6 +37,11 @@ namespace DescSlot
     constexpr uint32_t SkyMipSrv = 84;     // per mip m: SRV of mip m-1
     constexpr uint32_t SkyMipUav = 96;     // per mip m: UAV of mip m
     constexpr uint32_t ImGuiFont = 110;
+    // Sky multiple-scattering LUT, read as t3 / written as u3: each pair
+    // holds the same view twice so a table bound at the pair's start maps
+    // register 3 onto it.
+    constexpr uint32_t SkyMsUav = 112;     // 2 slots
+    constexpr uint32_t SkyMsSrv = 116;     // 2 slots
     // Ocean cascade mip generation: per (cascade c, map t in {disp, deriv,
     // foam}, mip m >= 1): SRV of mip m-1 and UAV of mip m, stride 16 mips.
     constexpr uint32_t OceanMipSrv = 128;  // + (c*3 + t)*16 + (m-1)

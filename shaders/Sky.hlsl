@@ -1,4 +1,5 @@
-// Atmosphere: single-scattering Rayleigh+Mie raymarch baked into a small
+// Atmosphere: single-scattering Rayleigh+Mie raymarch (plus, when enabled, a
+// multiple-scattering term from a small LUT, CSMsLut) baked into a small
 // cubemap whenever the time of day changes (CSSkyGen + CSSkyMip), then a
 // fullscreen skybox pass (VSSky/PSSky) that adds the sun disc, moon and stars
 // at full resolution.
@@ -15,10 +16,15 @@ cbuffer SkyCB : register(b0)
     float gOzone;      // ozone column, 0 = off, 1 = standard
     float gCloudSunlit; // 1 = cirrus lit by the sunlight that reaches its altitude
     float gPadS2;
+    float gAloft;      // haze layer aloft (~4 km): peak scattering at 550 nm, 1/m (0 = none)
+    float gMultiScatter; // 0 = single scattering only, 1 = + multiple scattering (LUT)
+    float2 gPadS3;
 }
 
 RWTexture2DArray<float4> uCube : register(u2);
+RWTexture2D<float4> uMsLut : register(u3);
 Texture2DArray<float4> tPrevMip : register(t2);
+Texture2D<float4> tMsLut : register(t3);
 
 static const float Re = 6371e3;         // planet radius
 static const float Ra = 6431e3;         // atmosphere top
@@ -31,6 +37,22 @@ static const float Hm = 1200.0;
 // hundreds of km: it deepens the sunset reds and keeps the zenith blue.
 // Absorption at peak density, tent profile 10-40 km (Bruneton 2017).
 static const float3 BetaO = float3(0.650e-6, 1.881e-6, 0.085e-6);
+// Haze layer aloft, above the marine boundary layer (a residual / advected
+// aerosol layer, Gaussian about 4 km, Angstrom exponent 1.0). Thin in any
+// vertical column, but the sunlight that reaches the air opposite a setting
+// sun skims the planet *through* it, tangentially, for hundreds of km, while
+// the beam to the observer only crosses it obliquely. So it deepens the
+// Earth's shadow and mutes the anti-twilight arch far more than it dims the
+// sun (a layer starting at the sea would mostly dim the sun).
+// Keep in sync with ExtraTransmittance in App.cpp.
+static const float kAloftZ = 4000.0, kAloftW = 1500.0;
+static const float3 kAloftSpectrum = float3(0.81, 1.0, 1.25);
+
+float AloftDensity(float h)
+{
+    float x = (h - kAloftZ) / kAloftW;
+    return exp(-x * x);
+}
 
 float OzoneDensity(float h)
 {
@@ -63,18 +85,19 @@ float PhaseMie(float mu)
 }
 
 // Optical depth along a ray to the top of the atmosphere: x Rayleigh, y Mie,
-// z ozone (in metres at the reference density).
-float3 OpticalDepth(float3 pos, float3 dir, int steps)
+// z ozone, w free-tropospheric aerosol (in metres at the reference density).
+float4 OpticalDepth(float3 pos, float3 dir, int steps)
 {
     float t = RaySphere(pos, dir, Ra).y;
     float dt = t / float(steps);
-    float3 od = 0;
+    float4 od = 0;
     float3 p = pos + dir * dt * 0.5;
     for (int i = 0; i < steps; ++i)
     {
         float h = length(p) - Re;
         od.xy += exp(-h / float2(Hr, Hm)) * dt;
         od.z += OzoneDensity(h) * dt;
+        od.w += AloftDensity(h) * dt;
         p += dir * dt;
     }
     return od;
@@ -90,10 +113,117 @@ float3 MieBeta()
     return BetaM * (1.0 + (gHaze - 1.0) * kHazeSpectrum);
 }
 
-// Total extinction for an optical-depth triple.
-float3 Extinction(float3 od)
+float3 AloftBeta()
 {
-    return BetaR * od.x + MieBeta() * 1.1 * od.y + BetaO * gOzone * od.z;
+    return gAloft * kAloftSpectrum;
+}
+
+// Total extinction for an optical-depth quadruple (see OpticalDepth).
+float3 Extinction(float4 od)
+{
+    return BetaR * od.x + MieBeta() * 1.1 * od.y + BetaO * gOzone * od.z + AloftBeta() * 1.1 * od.w;
+}
+
+// Scattering coefficient times step length, for per-step densities.
+float3 ScatteringStep(float densR, float densM, float densF)
+{
+    return BetaR * densR + MieBeta() * densM + AloftBeta() * densF;
+}
+
+// ---------------------------------------------------------------------------
+// Multiple scattering (Hillaire 2020, "A Scalable and Production Ready Sky and
+// Atmosphere Rendering Technique", sec. 5.5). Single scattering alone turns
+// the whole horizon ring of a sunset orange: away from the sun the only light
+// it knows is the reddened beam that skimmed the planet. Real twilight also
+// carries light scattered more than once, mostly out of the sunlit, blue
+// upper atmosphere, which fills the Earth's shadow with blue-grey and turns
+// the anti-twilight arch pink. For a point at altitude h with the sun at
+// zenith cosine mus, the second-order in-scatter L2 (isotropic phase) is
+// averaged over the sphere and the infinite series of higher orders is
+// folded in by 1 / (1 - f_ms), f_ms being the fraction re-scattered:
+//   Psi_ms = L2 / (1 - f_ms)   per unit sun intensity,
+// so the sky march adds sigma_s * Psi_ms along the view ray.
+// ---------------------------------------------------------------------------
+static const float kMsLutSize = 32.0;
+static const float kMsTop = Ra - Re;
+
+// LUT addressing: u = sun zenith cosine, v = sqrt(altitude) (finer near the
+// sea, where the haze is). Texel centres sit exactly on the grid below.
+float2 MsLutUv(float h, float mus)
+{
+    float2 g = float2(saturate(mus * 0.5 + 0.5), sqrt(saturate(h / kMsTop)));
+    return (g * (kMsLutSize - 1.0) + 0.5) / kMsLutSize;
+}
+
+float3 MultiScatterPsi(float3 p, float3 lightDir)
+{
+    float r = length(p);
+    return tMsLut.SampleLevel(samLinearClamp, MsLutUv(r - Re, dot(p / r, lightDir)), 0).rgb;
+}
+
+groupshared float3 gsMsL2[64];
+groupshared float3 gsMsF[64];
+
+// One group per LUT texel, one thread per direction of a 64-point Fibonacci
+// sphere.
+[numthreads(64, 1, 1)]
+void CSMsLut(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
+{
+    float mus = gid.x / (kMsLutSize - 1.0) * 2.0 - 1.0;
+    float v = gid.y / (kMsLutSize - 1.0);
+    float3 x = float3(0, Re + max(v * v * kMsTop, 5.0), 0);
+    float3 L = float3(0, mus, sqrt(saturate(1.0 - mus * mus)));
+
+    float fi = gi + 0.5;
+    float cosT = 1.0 - 2.0 * fi / 64.0;
+    float sinT = sqrt(saturate(1.0 - cosT * cosT));
+    float phi = 2.39996323 * fi; // golden angle
+    float3 w = float3(cos(phi) * sinT, cosT, sin(phi) * sinT);
+
+    float tMax = RaySphere(x, w, Ra).y;
+    float2 tg = RaySphere(x, w, Re);
+    if (tg.x > 0.0 && tg.y > 0.0)
+        tMax = min(tMax, tg.x);
+
+    const int STEPS = 20;
+    float dt = max(tMax, 0.0) / float(STEPS);
+    float3 l2 = 0, f = 0;
+    float4 od = 0;
+    float3 p = x + w * dt * 0.5;
+    for (int i = 0; i < STEPS; ++i)
+    {
+        float h = max(length(p) - Re, 0.0);
+        float3 d = float3(exp(-h / float2(Hr, Hm)), AloftDensity(h)) * dt;
+        float4 dOd = float4(d.xy, OzoneDensity(h) * dt, d.z);
+        float3 tv = exp(-Extinction(od + 0.5 * dOd));
+        od += dOd;
+        float3 s = ScatteringStep(d.x, d.y, d.z);
+        float2 tls = RaySphere(p, L, Re);
+        float3 ts = (tls.x > 0.0 && tls.y > 0.0) ? 0.0 : exp(-Extinction(OpticalDepth(p, L, 8)));
+        l2 += tv * s * ts;
+        f += tv * s;
+        p += w * dt;
+    }
+    gsMsL2[gi] = l2;
+    gsMsF[gi] = f;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint stride = 32; stride > 0; stride >>= 1)
+    {
+        if (gi < stride)
+        {
+            gsMsL2[gi] += gsMsL2[gi + stride];
+            gsMsF[gi] += gsMsF[gi + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (gi == 0)
+    {
+        // sphere averages; the isotropic phase 1/4pi applies to the 2nd order
+        float3 L2 = gsMsL2[0] / 64.0 / (4.0 * PI);
+        float3 fms = gsMsF[0] / 64.0;
+        uMsLut[gid.xy] = float4(L2 / max(1.0 - fms, 1e-3), 1.0);
+    }
 }
 
 float3 MarchScattering(float3 rd, float3 lightDir, float intensity)
@@ -111,27 +241,38 @@ float3 MarchScattering(float3 rd, float3 lightDir, float intensity)
     float phR = PhaseRayleigh(mu);
     float phM = PhaseMie(mu);
 
-    float3 sumR = 0, sumM = 0;
-    float3 odView = 0;
+    float3 sumR = 0, sumM = 0, sumF = 0, sumMs = 0;
+    float4 odView = 0;
     float3 p = ro + rd * dt * 0.5;
     for (int i = 0; i < STEPS; ++i)
     {
         float h = max(length(p) - Re, 0.0);
         float2 dens = exp(-h / float2(Hr, Hm)) * dt;
-        odView += float3(dens, OzoneDensity(h) * dt);
+        float densF = AloftDensity(h) * dt;
+        float4 dOd = float4(dens, OzoneDensity(h) * dt, densF);
+        odView += dOd;
 
         // Light reaching this sample (skip if the planet shadows it).
         float2 tls = RaySphere(p, lightDir, Re);
         if (!(tls.x > 0.0 && tls.y > 0.0))
         {
-            float3 odLight = OpticalDepth(p, lightDir, 6);
+            float4 odLight = OpticalDepth(p, lightDir, 6);
             float3 attn = exp(-Extinction(odView + odLight));
             sumR += attn * dens.x;
             sumM += attn * dens.y;
+            sumF += attn * densF;
         }
+        // Multiply scattered light reaches the shadowed samples too. Attenuate
+        // to the step's midpoint: a near-horizontal step spans ~36 km of the
+        // densest air, and the blue that fills the Earth's shadow dies in it.
+        [branch] if (gMultiScatter > 0.0)
+            sumMs += exp(-Extinction(odView - 0.5 * dOd)) * ScatteringStep(dens.x, dens.y, densF)
+                   * MultiScatterPsi(p, lightDir);
         p += rd * dt;
     }
-    return (sumR * BetaR * phR + sumM * MieBeta() * phM) * intensity;
+    float3 L = (sumR * BetaR * phR + sumM * MieBeta() * phM) * intensity;
+    // Zero unless the haze layer aloft / multiple scattering are on.
+    return L + (sumF * AloftBeta() * phM + sumMs * gMultiScatter) * intensity;
 }
 
 // Thin high-altitude cirrus, baked into the cube (cheap, static per preset).

@@ -19,6 +19,8 @@ public:
         float haze = 1.0f;        // aerosol (Mie) turbidity multiplier
         float ozone = 0.0f;       // Chappuis-band absorption, 0 = off, 1 = standard column
         float cloudSunlit = 0.0f; // 1 = cirrus lit by the sunlight transmitted to its altitude
+        float aloft = 0.0f;       // haze layer aloft (~4 km): peak scattering at 550 nm, 1/m
+        float multiScatter = 0.0f; // 1 = add multiple scattering (LUT pass)
     };
 
     void Create(GpuContext& ctx, uint32_t resolution);
@@ -31,10 +33,14 @@ public:
     void Draw(GpuContext& ctx, D3D12_GPU_VIRTUAL_ADDRESS frameCB);
 
 private:
+    static constexpr uint32_t kMsLutSize = 32; // = kMsLutSize in Sky.hlsl
+
     ComPtr<ID3D12Resource> cube;
-    ComPtr<ID3D12PipelineState> psoGen, psoMip, psoDraw;
+    ComPtr<ID3D12Resource> msLut; // multiple-scattering LUT (altitude x sun angle)
+    ComPtr<ID3D12PipelineState> psoGen, psoMip, psoDraw, psoMs;
     uint32_t res = 128;
     uint32_t mips = 8;
     bool dirty = true;
     bool inSrvState = false;
+    bool msInSrvState = false;
 };
