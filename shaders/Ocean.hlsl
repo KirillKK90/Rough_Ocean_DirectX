@@ -43,10 +43,76 @@ float3 CascadeFades(float dist)
 // matches the local vertex spacing. This is the vertex-shader counterpart of
 // the pixel shader's anisotropic filtering - without it the horizon geometry
 // point-samples fine waves and crawls.
-float CascadeLod(float dist, float invL)
+float CascadeLod(float dist, float invL, float gridScale)
 {
-    // vertex spacing (m) = dist * gGridScale; texel pitch (m) = L / N.
-    return log2(max(dist * gGridScale * gCascade1.w * invL, 1.0));
+    // vertex spacing (m) = dist * gridScale; texel pitch (m) = L / N.
+    return log2(max(dist * gridScale * gCascade1.w * invL, 1.0));
+}
+
+// ---------------------------------------------------------------------------
+// Zoom grid. The radial mesh spreads its vertices all around the camera and
+// out to the horizon, which suits the 60-degree lens; through a 100x zoom only
+// a sliver of it is on screen - a handful of triangles. While zoomed in, the
+// same mesh is re-laid over just the window the view can show (fitted on the
+// CPU by Ocean::FitZoomGrid): its sectors fan across the view, with a few wide
+// ones closing the circle behind the camera, and its rings fill the visible
+// distances, with a few coarse skirt rings in to r0 and out to the sea's edge
+// so the surface never ends early. Both lattices stay fixed in the world while
+// the view pans, so the vertices do not swim.
+// Returns the camera-relative offset, and the vertex spacing per metre of
+// distance there (for the displacement mip).
+// ---------------------------------------------------------------------------
+float2 ZoomGridOffset(float2 off, out float gridScale)
+{
+    gridScale = gGridScale;
+    float r = length(off);
+    [branch] if (gZoomFan.x <= 0.0 || r <= 0.0)
+        return off; // plain mesh, or its centre vertex
+
+    // The vertex's sector and ring in the plain mesh.
+    float S = gZoomFan.x;
+    float s = round(atan2(off.x, off.y) * (S / (2.0 * PI)));
+    s += s < 0.0 ? S : 0.0;
+    float i = round((log(r) - gZoomRings.x) * gZoomRings.y);
+
+    // Sector -> angle from the view direction: the front fan in even steps,
+    // then the back sectors closing the circle.
+    float Sf = gZoomFan.y, aStep = gZoomFan.w;
+    float back = (2.0 * PI - Sf * aStep) / max(S - Sf, 1.0);
+    float rel = gZoomFan.z + min(s, Sf) * aStep + max(s - Sf, 0.0) * back;
+    float aScale = s < Sf ? aStep : back;
+
+    // Ring -> radius: inner skirt, the window lattice, outer skirt.
+    float P = gZoomSkirt.y;
+    float W = gZoomSkirt.x - 1.0 - 2.0 * P; // window steps
+    float rLo = gZoomRings.z, vStep = gZoomRings.w;
+    float rHi = rLo * exp(W * vStep);
+    float w = i - P;
+    float rr, rScale;
+    if (w < 0.0)
+    {
+        float span = log(rLo / min(gZoomSkirt.z, rLo));
+        rr = rLo * exp(span * w / P);
+        rScale = span / P;
+    }
+    else if (w > W)
+    {
+        float span = log(max(gZoomSkirt.w / rHi, 1.0));
+        rr = rHi * exp(span * (w - W) / P);
+        rScale = span / P;
+    }
+    else
+    {
+        rr = rLo * exp(w * vStep);
+        rScale = vStep;
+    }
+    rr = min(rr, gZoomSkirt.w);
+    gridScale = max(rScale, aScale);
+
+    // Turn by the view yaw (gZoom.zw = sin, cos): world angle = yaw + rel.
+    float sn, cs;
+    sincos(rel, sn, cs);
+    return rr * float2(sn * gZoom.w + cs * gZoom.z, cs * gZoom.w - sn * gZoom.z);
 }
 
 // ---------------------------------------------------------------------------
@@ -101,9 +167,11 @@ float GlitterShimmer(float2 uv, float2 fp, float t)
 VSOut VSOcean(VSIn v)
 {
     VSOut o;
-    float2 worldXZ = gCamPos.xz + v.off;
-    float dist = length(v.off);
-    float3 fades = CascadeFades(dist);
+    float gridScale;
+    float2 off = ZoomGridOffset(v.off, gridScale);
+    float2 worldXZ = gCamPos.xz + off;
+    float dist = length(off);
+    float3 fades = CascadeFades(dist * gZoom.y); // zoomed in, detail stays resolved further out
 
     // Whirlpool: the ambient sea is sampled through the vortex particle map,
     // so the existing waves visibly wind and converge into the drain. While
@@ -116,9 +184,9 @@ VSOut VSOcean(VSIn v)
     WhirlWarp(worldXZ, wSamp, wJ, wRot, wBlend, wCalm);
 
     float3 lods = float3(
-        CascadeLod(dist, gCascade0.x),
-        CascadeLod(dist, gCascade1.x),
-        CascadeLod(dist, gCascade2.x));
+        CascadeLod(dist, gCascade0.x, gridScale),
+        CascadeLod(dist, gCascade1.x, gridScale),
+        CascadeLod(dist, gCascade2.x, gridScale));
 
     float3 disp = 0;
     [branch] if (wBlend < 0.999)
@@ -167,7 +235,7 @@ VSOut VSOcean(VSIn v)
     WhirlWaves(worldXZ, whDisp, whSlope, whFoam);
     disp += whDisp;
 
-    float3 rel = float3(v.off.x + disp.x, disp.y - gCamPos.y, v.off.y + disp.z);
+    float3 rel = float3(off.x + disp.x, disp.y - gCamPos.y, off.y + disp.z);
     o.pos = mul(float4(rel, 1.0), gViewProj);
     o.rel = rel;
     o.worldXZ = worldXZ + disp.xz;
@@ -284,7 +352,7 @@ float4 PSOcean(VSOut i) : SV_Target
     float foamTexture = Fbm(i.worldXZ * 0.9 + float2(0.07, 0.05) * gTime, 3);
     // The procedural break-up has no mip chain: ease it toward its mean at
     // range so it doesn't reintroduce the speckle the filtered maps removed.
-    foamTexture = lerp(foamTexture, 0.55, saturate(dist / 900.0));
+    foamTexture = lerp(foamTexture, 0.55, saturate(dist * gZoom.y / 900.0));
     // Break the accumulated whitecap field into crest streaks and drop the thin
     // veil below a threshold, so even heavy seas read as dark water with bright
     // foam accents rather than a solid sheet (which a high, bright sun blows
@@ -297,7 +365,7 @@ float4 PSOcean(VSOut i) : SV_Target
 
     // --- Roughness: base + fading detail cascades add variance + foam ---
     float detailLoss = (1.0 - i.fades.y) * gCascade1.z + (1.0 - i.fades.z) * gCascade2.z;
-    float rough = saturate(gRoughBase + detailLoss + gDistRough * saturate(dist / 2500.0) + foam * 0.35);
+    float rough = saturate(gRoughBase + detailLoss + gDistRough * saturate(dist * gZoom.y / 2500.0) + foam * 0.35);
     // Widen the microfacet lobe by the filtered-out slope variance
     // (alpha^2 ~ 2 sigma^2 for GGX). This is where sub-pixel wave detail goes
     // instead of sparkling: the distant sea turns satin under the sun path.

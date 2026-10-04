@@ -112,7 +112,8 @@ void Post::DrawFullscreen(GpuContext& ctx, ID3D12PipelineState* pso,
 }
 
 void Post::Record(GpuContext& ctx, uint32_t backbufferRtvSlot, bool fxaaOn,
-                  float exposure, float bloomIntensity, float bloomThreshold, float vignette)
+                  float exposure, float bloomIntensity, float bloomThreshold, float vignette,
+                  float dither)
 {
     ID3D12GraphicsCommandList* cmd = ctx.Cmd();
     cmd->SetGraphicsRootSignature(ctx.graphicsRS.Get());
@@ -143,7 +144,7 @@ void Post::Record(GpuContext& ctx, uint32_t backbufferRtvSlot, bool fxaaOn,
     }
 
     // Tonemap.
-    float tm[8] = { 1.0f / width, 1.0f / height, exposure, bloomIntensity, vignette, 0, 0, 0 };
+    float tm[8] = { 1.0f / width, 1.0f / height, exposure, bloomIntensity, vignette, dither, 0, 0 };
     if (fxaaOn)
     {
         DrawFullscreen(ctx, psoTonemap.Get(), ctx.RtvCpu(RtvSlot::Ldr), width, height, DescSlot::Tonemap, tm);

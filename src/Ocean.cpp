@@ -1,7 +1,9 @@
 #include "Ocean.h"
 
 #include <DirectXPackedVector.h>
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 
@@ -52,6 +54,7 @@ void Ocean::Create(GpuContext& ctx, const OceanQuality& quality)
         h0Initialized[c] = false;
     }
     framesRecorded = 0;
+    zoomFanLevel = zoomRingLevel = -1; // the mesh is rebuilt below
 
     // Cascade patch sizes and spectral band splits (in wavelength, meters).
     if (numCascades >= 3)
@@ -214,8 +217,10 @@ void Ocean::BuildMesh(GpuContext& ctx, const OceanQuality& quality)
 {
     const uint32_t S = quality.sectors;
     const uint32_t R = quality.rings;
-    const float r0 = 1.5f;
-    const float rMax = 42000.0f;
+    const float r0 = kMeshR0;
+    const float rMax = kMeshRMax;
+    sectors = S;
+    rings = R;
     // Geometric ring growth: radial vertex spacing at distance d is
     // d * ln(rMax/r0)/(R-1). The vertex shader matches its displacement mip
     // to this so far geometry doesn't point-sample fine waves.
@@ -552,6 +557,111 @@ float Ocean::SampleHeightAt(uint32_t slot, float x, float z, float lambda) const
         pz = z - lambda * d.z;
     }
     return d.y;
+}
+
+float Ocean::RoughHeight(GpuContext& ctx, float x, float z) const
+{
+    if (framesRecorded < GpuContext::kFramesInFlight)
+        return 0.0f;
+    return SampleDispCpu(ctx.frameIndex, x, z).y;
+}
+
+OceanZoomGrid Ocean::PlainConstants() const
+{
+    OceanZoomGrid g;
+    g.fan = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f); // sectors = 0: the shader keeps the plain mesh
+    g.rings = XMFLOAT4(std::log(kMeshR0), 1.0f / gridScale, kMeshR0, gridScale);
+    g.skirt = XMFLOAT4(float(rings), 0.0f, kMeshR0, kMeshRMax);
+    return g;
+}
+
+OceanZoomGrid Ocean::PlainZoomGrid()
+{
+    zoomFanLevel = zoomRingLevel = -1;
+    zoomFanWait = zoomRingWait = 0.0f;
+    return PlainConstants();
+}
+
+// Picks a lattice level for a span that must fit `need` (in plain-mesh
+// steps, with two steps of slack for anchoring) within `slots` steps. Level k
+// divides the plain step by 2^k, so a refinement keeps every other vertex
+// where it was. The finest level that fits is the goal: a span the window has
+// outgrown coarsens at once, while a finer level is only taken once it has
+// fitted for a moment, so a passing wave cannot make the mesh flicker between
+// two levels. Returns false if even the plain step cannot span it.
+static bool FitLattice(double need, double slots, float dt, int& level, int64_t& anchor, float& wait)
+{
+    int fit = int(std::floor(std::log2((slots - 2.0) / std::max(need, 1e-12))));
+    if (fit < 0)
+    {
+        level = -1;
+        return false;
+    }
+    fit = std::min(fit, 16);
+    const float kRefineDelay = 0.25f; // s
+    wait = (level >= 0 && fit > level) ? wait + dt : 0.0f;
+    if (level < 0 || level > fit || wait >= kRefineDelay)
+    {
+        level = fit;
+        anchor = INT64_MIN; // re-anchor below
+        wait = 0.0f;
+    }
+    return true;
+}
+
+// Anchors a span of `slots` lattice steps over [lo, hi] (in steps of its
+// level): kept while it still covers them, so panning slides the window over
+// a lattice that stays put; otherwise centred on them.
+static void AnchorLattice(double lo, double hi, double slots, int64_t& anchor)
+{
+    if (anchor == INT64_MIN || lo < double(anchor) || hi > double(anchor) + slots)
+        anchor = std::llround(0.5 * (lo + hi - slots));
+}
+
+OceanZoomGrid Ocean::FitZoomGrid(float yaw, float halfAz, float rhoNear, float rhoFar, float dt)
+{
+    const double kTwoPiD = 6.283185307179586;
+    OceanZoomGrid g = PlainConstants();
+    const double S = sectors;
+
+    // --- Sectors: a front fan across the view; the back sectors close the
+    // circle behind the camera. Plain layout if the view needs nearly all of it.
+    const double front = S - kZoomBackSectors;
+    double fanNeed = 2.0 * halfAz / (kTwoPiD / S);
+    double fanStep = kTwoPiD / S, fanFirst = 0.0, fanFront = S;
+    if (FitLattice(fanNeed, front, dt, zoomFanLevel, zoomFanAnchor, zoomFanWait))
+    {
+        fanStep = kTwoPiD / std::ldexp(S, zoomFanLevel);
+        AnchorLattice((yaw - halfAz) / fanStep, (yaw + halfAz) / fanStep, front, zoomFanAnchor);
+        fanFirst = double(zoomFanAnchor) * fanStep;
+        fanFront = front;
+    }
+    // The shader turns the fan by the yaw itself: only the small offset from
+    // the view direction goes through float, so vertices hold still at 100x.
+    g.fan = XMFLOAT4(float(S), float(fanFront), float(fanFirst - double(yaw)), float(fanStep));
+
+    // --- Rings: the window lattice between a few coarse skirt rings, inward
+    // to r0 and outward to the sea's edge. Plain rings if the window is wider
+    // than any lattice holds.
+    const double P = kZoomSkirtRings;
+    const double W = double(rings) - 1.0 - 2.0 * P; // window steps
+    const double lnEdge = std::log(double(kMeshRMax));
+    double n0 = std::log(std::clamp(double(rhoNear), 0.05, 0.99 * double(kMeshRMax)));
+    double n1 = std::clamp(std::log(std::max(double(rhoFar), 1e-3)), n0 + 1e-3, lnEdge);
+    if (FitLattice((n1 - n0) / gridScale, W, dt, zoomRingLevel, zoomRingAnchor, zoomRingWait))
+    {
+        double step = gridScale / std::ldexp(1.0, zoomRingLevel);
+        double lo = n0 / step, hi = n1 / step;
+        AnchorLattice(lo, hi, W, zoomRingAnchor);
+        // Never past the sea's edge, where the outer rings would collapse.
+        int64_t edge = int64_t(std::ceil(lnEdge / step - W));
+        if (zoomRingAnchor > edge)
+            zoomRingAnchor = std::max(edge, int64_t(std::ceil(hi - W)));
+        g.rings.z = float(std::exp(double(zoomRingAnchor) * step));
+        g.rings.w = float(step);
+        g.skirt.y = float(P);
+    }
+    return g;
 }
 
 WaterSample Ocean::Sample(GpuContext& ctx, float x, float z, float lambda) const

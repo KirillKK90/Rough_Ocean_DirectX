@@ -391,7 +391,9 @@ float3 StarField(float3 rd)
     float h = Hash12(cell);
     float2 starPos = float2(Hash12(cell + 13.1), Hash12(cell + 27.7));
     float d = length(f - starPos);
-    float brightness = smoothstep(0.10, 0.0, d) * pow(h, 14.0) * 3.5;
+    // A star is a point source: through the zoom lens it spreads apart from
+    // its neighbours but keeps its on-screen size.
+    float brightness = smoothstep(0.10 * gZoom.y, 0.0, d) * pow(h, 14.0) * 3.5;
     float3 tint = lerp(float3(0.75, 0.85, 1.0), float3(1.0, 0.92, 0.8), Hash12(cell + 5.5));
     return brightness * tint;
 }

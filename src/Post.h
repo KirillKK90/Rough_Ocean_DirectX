@@ -16,9 +16,11 @@ public:
 
     // Runs bloom + tonemap (+ FXAA) and writes the final image into the
     // given backbuffer RTV. Expects the HDR texture in RENDER_TARGET state;
-    // leaves it in RENDER_TARGET state for the next frame.
+    // leaves it in RENDER_TARGET state for the next frame. dither is the
+    // output noise amplitude in 8-bit steps (0 = none).
     void Record(GpuContext& ctx, uint32_t backbufferRtvSlot, bool fxaaOn,
-                float exposure, float bloomIntensity, float bloomThreshold, float vignette);
+                float exposure, float bloomIntensity, float bloomThreshold, float vignette,
+                float dither);
 
     float exposureMul = 1.0f;
 

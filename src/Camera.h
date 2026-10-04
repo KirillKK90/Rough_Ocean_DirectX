@@ -14,6 +14,7 @@ public:
     float yaw = 0.0f;    // radians, 0 = +Z
     float pitch = 0.0f;  // radians, + looks up
     float fovY = 60.0f * DirectX::XM_PI / 180.0f;
+    float zoom = 1.0f;   // optical zoom: focal length relative to the fovY lens
     float nearZ = 0.4f;
     float farZ = 80000.0f;
     float moveSpeed = 8.0f; // m/s
@@ -33,11 +34,18 @@ public:
         return DirectX::XMMatrixLookToLH(DirectX::XMVectorZero(), fwd, up);
     }
 
+    // Field of view through the zoom lens: a longer focal length shrinks the
+    // half-angle tangent by the zoom factor.
+    float ZoomedFovY() const
+    {
+        return zoom == 1.0f ? fovY : 2.0f * std::atan(std::tan(0.5f * fovY) / zoom);
+    }
+
     // Reversed-Z projection (near/far swapped) for good depth precision at
     // horizon distances.
     DirectX::XMMATRIX Proj(float aspect) const
     {
-        return DirectX::XMMatrixPerspectiveFovLH(fovY, aspect, farZ, nearZ);
+        return DirectX::XMMatrixPerspectiveFovLH(ZoomedFovY(), aspect, farZ, nearZ);
     }
 
     DirectX::XMMATRIX ViewProj(float aspect) const
@@ -47,7 +55,9 @@ public:
 
     void AddLook(float dx, float dy)
     {
-        yaw += dx;
+        // Wrapped, so the angle keeps full float precision: at 100x zoom one
+        // pixel is ~1e-5 rad, which a yaw wound up over many turns would lose.
+        yaw = std::remainder(yaw + dx, DirectX::XM_2PI);
         pitch = std::clamp(pitch - dy, -1.5f, 1.5f);
     }
 

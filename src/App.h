@@ -37,6 +37,7 @@ struct LaunchOptions
     bool hasCamera = false;
     float camX = 0, camY = 12, camZ = 0;
     float yawDeg = 0, pitchDeg = -1.0f;
+    float zoom = 1.0f;     // --zoom: start at this optical zoom
 };
 
 class App
@@ -71,6 +72,10 @@ private:
         DirectX::XMFLOAT4 whirl3[Whirlpool::kMaxActive];
         DirectX::XMFLOAT4 sunFx;      // x = horizon shimmer, y = refraction flattening
         DirectX::XMFLOAT4 sunTauGrad; // xyz = disc optical-depth change per radius upward
+        DirectX::XMFLOAT4 zoom;       // x = optical zoom, y = 1 / zoom, zw = sin, cos of the view yaw
+        DirectX::XMFLOAT4 zoomFan;    // OceanZoomGrid
+        DirectX::XMFLOAT4 zoomRings;
+        DirectX::XMFLOAT4 zoomSkirt;
     };
 
     void InitWindow(HINSTANCE hInst);
@@ -81,12 +86,14 @@ private:
     void ApplySeaState();
     void UpdateLighting();
     void UpdateCameraInput(float dt);
+    void UpdateZoom(float dt);   // eases the lens toward the RMB + wheel target
     void LaunchMeteor(); // fires the rock + its descent sound
     void LaunchMeteorAt(int mouseX, int mouseY); // click-to-place impact from the sky
     void SpawnWhirlpool();                       // vortex a fixed way ahead of the camera
     void SpawnWhirlpoolAt(int mouseX, int mouseY); // click-to-place vortex
     // Unproject a screen pixel onto the mean water plane y = 0.
     bool PickWater(int mouseX, int mouseY, DirectX::XMFLOAT3& hit) const;
+    OceanZoomGrid FitZoomGrid(float dt); // the ocean mesh's window for the current zoom
     void RenderFrame(float dt);
     void BuildUi(float dt);
     D3D12_GPU_VIRTUAL_ADDRESS FillFrameCB();
@@ -160,6 +167,9 @@ private:
     LONG_PTR windowedStyle = 0;
     bool mouseLook = false;
     POINT lastMouse = {};
+    float zoomSteps = 0.0f; // RMB + wheel notches; target zoom = 2^(steps / 3)
+    OceanZoomGrid zoomGrid{}; // fitted each frame before the ocean is drawn
+    float zoomExcessNear = 0.0f, zoomExcessFar = 0.0f; // how far waves reach past the flat-sea window (log)
 
     // Bench / FPS statistics.
     int frameCounter = 0;

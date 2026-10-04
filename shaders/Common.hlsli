@@ -33,6 +33,12 @@ cbuffer FrameCB : register(b0)
     float4 gWhirl3[4];      // x = draw-in, y = reach m, z = cull radius m, w = pattern dissolve s
     float4 gSunFx;          // x = horizon-sun shimmer 0..1 (0 = off), y = refraction flattening of the disc
     float4 gSunTauGrad;     // xyz = optical-depth change across the disc, per radius upward
+    float4 gZoom;           // x = optical zoom, y = 1/zoom: scales distances used as a pixel-footprint proxy;
+                            // zw = sin, cos of the view yaw
+    // Zoom grid (Ocean.hlsl ZoomGridOffset, fitted by Ocean::FitZoomGrid):
+    float4 gZoomFan;        // x = mesh sectors (0 = plain mesh), y = front sectors, z = first front angle - yaw, w = its step
+    float4 gZoomRings;      // x = ln r0, y = 1 / plain ring log-step, z = first window ring radius m, w = window log-step
+    float4 gZoomSkirt;      // x = mesh rings, y = skirt rings at each end of the window, z = r0 m, w = sea radius m
 }
 
 // Per-object constants.
@@ -575,7 +581,7 @@ void WhirlWavesOne(int i, float2 worldXZ, inout float3 disp, inout float2 slope,
         float gpsi = sqrt(Thp * Thp + 1.0 / (r * r));
         float spacing = 2.0 * PI / (WHIRL_STREAK_N * gpsi);
         float W = min(WHIRL_STREAK_W * rc * sqrt(max(1.0, r / (1.5 * rc)))
-                      + WHIRL_STREAK_PX * length(worldXZ - gCamPos.xz), 0.25 * spacing);
+                      + WHIRL_STREAK_PX * length(worldXZ - gCamPos.xz) * gZoom.y, 0.25 * spacing);
         float dperp = dpsi / gpsi;
         float streak = exp(-dperp * dperp / (W * W));
         float segs = smoothstep(0.30, 0.65, nS);          // broken into lit segments

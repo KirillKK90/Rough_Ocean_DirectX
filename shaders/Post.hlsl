@@ -85,7 +85,8 @@ float4 PSBloomUp(VSOut i) : SV_Target
 
 // ---------------------------------------------------------------------------
 // Tonemap: tSrc0 = HDR scene, tSrc1 = bloom.
-// gParamA.x = exposure, gParamA.y = bloom intensity, gParamB.x = vignette
+// gParamA.x = exposure, gParamA.y = bloom intensity, gParamB.x = vignette,
+// gParamB.y = output dither, in 8-bit steps (0 = off)
 // ---------------------------------------------------------------------------
 float3 ACESFilmT(float3 x)
 {
@@ -105,6 +106,17 @@ float4 PSTonemap(VSOut i) : SV_Target
 
     c = ACESFilmT(c);
     c = pow(abs(c), 1.0 / 2.2);
+
+    // Zoomed in, a smooth sky gradient spreads each 8-bit level over a band
+    // tens of pixels wide. A triangular dither of +-1 step (two interleaved-
+    // gradient-noise samples) breaks the bands up, far below FXAA's threshold.
+    [branch] if (gParamB.y > 0.0)
+    {
+        float2 p = i.pos.xy;
+        float n0 = frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
+        float n1 = frac(52.9829189 * frac(dot(p + float2(47.0, 17.0), float2(0.06711056, 0.00583715))));
+        c += (n0 + n1 - 1.0) * (gParamB.y / 255.0);
+    }
     return float4(c, 1.0);
 }
 

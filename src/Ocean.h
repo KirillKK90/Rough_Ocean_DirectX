@@ -42,6 +42,19 @@ struct WaterSample
     DirectX::XMFLOAT3 normal{ 0, 1, 0 };
 };
 
+// Zoom grid: while the camera is zoomed in, the radial mesh is re-laid over
+// only the window of sea the narrow view can show (ZoomGridOffset in
+// Ocean.hlsl). Mirrors gZoomFan / gZoomRings / gZoomSkirt in FrameCB.
+struct OceanZoomGrid
+{
+    DirectX::XMFLOAT4 fan;   // x = mesh sectors (0 = plain mesh), y = front sectors,
+                             // z = first front angle minus the view yaw, w = front angular step
+    DirectX::XMFLOAT4 rings; // x = ln r0, y = 1 / plain ring log-step,
+                             // z = first window ring radius (m), w = window ring log-step
+    DirectX::XMFLOAT4 skirt; // x = mesh rings, y = skirt rings at each end of the window,
+                             // z = r0 (m), w = sea radius (m)
+};
+
 class Ocean
 {
 public:
@@ -58,6 +71,19 @@ public:
     // CPU-side water query at absolute world XZ (uses the readback completed
     // kFramesInFlight frames ago; call between BeginFrame and RecordSimulation).
     WaterSample Sample(GpuContext& ctx, float x, float z, float lambda) const;
+    // Height of the water column that starts at x, z before the choppy
+    // sideways shift: within that shift (a metre or two) of Sample().height,
+    // for a fraction of the cost. For coarse queries such as the zoom window.
+    float RoughHeight(GpuContext& ctx, float x, float z) const;
+
+    // Lays the zoom grid over the window a zoomed-in view can show: azimuths
+    // within halfAz of yaw, horizontal distances rhoNear..rhoFar from the
+    // camera. Both lattices stay fixed in the world until the window outgrows
+    // them, so panning does not move a vertex. dt (s) paces their refinement.
+    OceanZoomGrid FitZoomGrid(float yaw, float halfAz, float rhoNear, float rhoFar, float dt);
+    // The plain camera-centred mesh (zoom grid off); forgets the fitted lattices.
+    OceanZoomGrid PlainZoomGrid();
+    float SeaRadius() const { return kMeshRMax; }
 
     float CascadeLength(uint32_t c) const { return casc[c].L; }
     uint32_t NumCascades() const { return numCascades; }
@@ -80,16 +106,30 @@ private:
     };
 
     void BuildMesh(GpuContext& ctx, const OceanQuality& quality);
+    OceanZoomGrid PlainConstants() const;
     void RecordCascadeSim(GpuContext& ctx, uint32_t c, float simTime, float dt,
                           const OceanParams& params, bool reinit);
     DirectX::XMFLOAT3 SampleDispCpu(uint32_t slot, float x, float z) const;
     float SampleHeightAt(uint32_t slot, float x, float z, float lambda) const;
+
+    // Radial mesh extent, and the zoom grid's share of it: sectors that close
+    // the circle behind the camera, coarse rings at each end of the window.
+    static constexpr float kMeshR0 = 1.5f;
+    static constexpr float kMeshRMax = 42000.0f;
+    static constexpr uint32_t kZoomBackSectors = 8;
+    static constexpr uint32_t kZoomSkirtRings = 3;
 
     Cascade casc[kMaxCascades];
     uint32_t fftN = 256;
     uint32_t numCascades = 3;
     uint32_t mipLevels = 1;       // full chain on disp/deriv/foam maps
     float gridScale = 0.05f;
+    uint32_t sectors = 384, rings = 224;
+    // Fitted zoom-grid lattices: level k halves the plain step k times; the
+    // anchor is the lattice index of the first front sector / window ring.
+    int zoomFanLevel = -1, zoomRingLevel = -1; // -1 = refit next time
+    int64_t zoomFanAnchor = 0, zoomRingAnchor = 0;
+    float zoomFanWait = 0.0f, zoomRingWait = 0.0f; // s a finer level has fitted
     float swellAmpTexel = 0.0f;   // swellAmp / sqrt(sum G^2), cached per reinit
 
     ComPtr<ID3D12PipelineState> psoInit, psoUpdate, psoFFT, psoAssemble, psoDraw;

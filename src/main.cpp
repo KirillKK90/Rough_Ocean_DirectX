@@ -68,6 +68,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         }
         else if (a == L"--yaw") { opts.hasCamera = true; opts.yawDeg = std::wcstof(next().c_str(), nullptr); }
         else if (a == L"--pitch") { opts.hasCamera = true; opts.pitchDeg = std::wcstof(next().c_str(), nullptr); }
+        else if (a == L"--zoom") opts.zoom = std::wcstof(next().c_str(), nullptr);
         else if (a == L"--fixeddt") opts.fixedDt = std::wcstof(next().c_str(), nullptr);
         else if (a == L"--meteor") opts.meteorAt = std::wcstof(next().c_str(), nullptr);
         else if (a == L"--clickmeteor") // test hook: place the auto-meteor at a screen pixel
@@ -111,6 +112,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
                  "  --ui               keep the UI visible in benchmark screenshots\n"
                  "  --campos X Y Z     camera position override\n"
                  "  --yaw D --pitch D  camera angles override (degrees)\n"
+                 "  --zoom X           start at optical zoom X, 0.5..100 (default 1)\n"
                  "  --meteor T         auto-launch a meteorite at sim time T seconds\n"
                  "  --whirl T          auto-spawn a whirlpool at sim time T seconds\n"
                  "  --whirlstrength N  strength preset 0..6: weak/medium/strong/super/\n"

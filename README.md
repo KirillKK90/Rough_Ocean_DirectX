@@ -122,6 +122,8 @@ Studio and build/run from there.
 ## Controls
 
 - **Right mouse drag** — look around
+- **Right mouse button + mouse wheel** — optical zoom from 0.5x to 100x: wheel
+  forward zooms in, back zooms out. The level shows under the FPS readout
 - **Left mouse click on the water** — drop a meteorite exactly there. Click the
   left half of the view and it streaks in from the right of the sky; click the
   right half and it comes from the left
@@ -161,6 +163,7 @@ All levels are far above the 25–30 FPS target on an integrated Intel Iris Xe
 --screenshot PATH  save a PNG at the end of a benchmark run
 --ui               keep the UI visible in benchmark screenshots
 --campos X Y Z     override the camera position (with --yaw / --pitch, degrees)
+--zoom X           start at optical zoom X, 0.5..100 (default 1)
 --meteor T         auto-launch a meteorite at sim time T seconds
 --fixeddt S        fixed timestep in seconds (deterministic runs)
 --novsync          disable vsync

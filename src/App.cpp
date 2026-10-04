@@ -201,6 +201,13 @@ namespace
     };
     constexpr int kNumLods = int(std::size(kLods));
 
+    // Optical zoom (RMB + wheel). A notch is a third of a doubling, so 1x, 2x,
+    // 4x ... land exactly. Notch +20 is 2^(20/3) = 101.6x, held at the 100x stop.
+    constexpr float kZoomMin = 0.5f, kZoomMax = 100.0f;
+    constexpr float kZoomStepsPerDoubling = 3.0f;
+    constexpr float kZoomStepsMin = -3.0f, kZoomStepsMax = 20.0f;
+    constexpr float kZoomGlide = 0.07f; // s, time constant of the lens easing to a new stop
+
     XMFLOAT3 DirFromElevAz(float elevDeg, float azDeg)
     {
         float e = XMConvertToRadians(elevDeg);
@@ -356,6 +363,7 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
         if (opts.fixedDt > 0.0f)
             dt = opts.fixedDt; // deterministic verification runs
 
+        UpdateZoom(dt);
         UpdateCameraInput(dt);
         simTime += dt * uiTimeScale;
 
@@ -527,6 +535,11 @@ void App::InitSystems()
         camera.yaw = XMConvertToRadians(opts.yawDeg);
         camera.pitch = XMConvertToRadians(opts.pitchDeg);
     }
+    if (opts.zoom != 1.0f)
+    {
+        camera.zoom = std::clamp(opts.zoom, kZoomMin, kZoomMax);
+        zoomSteps = std::clamp(kZoomStepsPerDoubling * std::log2(camera.zoom), kZoomStepsMin, kZoomStepsMax);
+    }
     buoy.anchor = XMFLOAT2(0.0f, 95.0f);
 
     ApplyLod(uiLod, true);
@@ -663,6 +676,16 @@ void App::UpdateCameraInput(float dt)
         camera.Move(fwd * boost, right * boost, up * boost, dt);
 }
 
+// The lens glides to each new wheel stop instead of jumping. It eases in log
+// space, so every notch takes the same time at 1x as at 80x.
+void App::UpdateZoom(float dt)
+{
+    float target = std::clamp(std::exp2(zoomSteps / kZoomStepsPerDoubling), kZoomMin, kZoomMax);
+    float lz = std::log(camera.zoom), lt = std::log(target);
+    lz += (lt - lz) * (1.0f - std::exp(-dt / kZoomGlide));
+    camera.zoom = std::abs(lt - lz) < 1e-3f ? target : std::exp(lz);
+}
+
 void App::LaunchMeteor()
 {
     meteor.Launch(camera, uiMeteorPower);
@@ -693,6 +716,161 @@ bool App::PickWater(int mouseX, int mouseY, XMFLOAT3& hit) const
     float t = std::min(-camera.pos.y / d.y, 25000.0f);
     hit = XMFLOAT3(camera.pos.x + d.x * t, 0.0f, camera.pos.z + d.z * t);
     return true;
+}
+
+// The window of sea a zoomed-in view shows, for Ocean::FitZoomGrid. Rays along
+// the frustum's bottom and top edges are marched against the actual surface -
+// wind sea, whirlpools, impact waves - since a deep funnel or a tall bore can
+// fill a telephoto view far from where the mean sea plane would put it. Down
+// a screen column the surface can only be met nearer as the ray tips down, so
+// those two edges bound everything between them.
+OceanZoomGrid App::FitZoomGrid(float dt)
+{
+    if (camera.zoom <= 1.0f)
+    {
+        zoomExcessNear = zoomExcessFar = 0.0f;
+        return ocean.PlainZoomGrid();
+    }
+
+    // How far the surface can stray from the mean plane. It only sets how far
+    // each ray is marched, so it can afford to be generous.
+    float wave = 3.0f * ampEstimate + 0.5f;
+    float up = wave, down = wave;
+    float side = wave * std::max(oceanParams.choppiness, 1.0f); // choppy sideways shift
+    XMFLOAT4 impacts[Meteor::kMaxImpacts];
+    meteor.FillImpacts(impacts);
+    for (const XMFLOAT4& im : impacts)
+        if (im.z > 0.0f)
+        {
+            up += 4.0f * im.w; // splash + ring packet + bore
+            down += 4.0f * im.w;
+            side += 2.5f * im.w;
+        }
+    XMFLOAT4 w1[Whirlpool::kMaxActive], w2[Whirlpool::kMaxActive], w3[Whirlpool::kMaxActive];
+    whirlpool.FillCB(w1, w2, w3);
+    for (uint32_t i = 0; i < Whirlpool::kMaxActive; ++i)
+        if (w1[i].z > 0.0f)
+        {
+            down += w1[i].w;                           // funnel
+            up += 0.3f * w1[i].w;                      // collapse boil + rebound rings
+            side += 0.5f * w1[i].w + 0.35f * w2[i].z;  // inward pull
+        }
+
+    const bool whirlOn = whirlpool.AnyActive(), meteorOn = meteor.AnyImpactActive();
+    const XMFLOAT3 eye = camera.pos;
+    const float seaR = ocean.SeaRadius();
+    // Height of the ray point t over the surface below it.
+    auto above = [&](const XMFLOAT3& d, float t)
+    {
+        float x = eye.x + d.x * t, z = eye.z + d.z * t;
+        float s = ocean.RoughHeight(ctx, x, z);
+        if (whirlOn)
+            s += whirlpool.HeightAt(x, z);
+        if (meteorOn)
+            s += meteor.HeightAt(x, z);
+        return eye.y + d.y * t - s;
+    };
+    // Horizontal distance at which a ray first meets the surface: the sea's
+    // edge if it gets there first, -1 if it clears every crest.
+    auto hitDistance = [&](XMVECTOR dir)
+    {
+        XMFLOAT3 d;
+        XMStoreFloat3(&d, XMVector3Normalize(dir));
+        if (d.y >= 0.0f && eye.y >= up)
+            return -1.0f;
+        float horiz = std::max(std::sqrt(d.x * d.x + d.z * d.z), 1e-6f);
+        float tEdge = seaR / horiz;
+        // The stretch of ray inside the band the surface can reach.
+        float t0 = d.y < 0.0f ? std::max(0.0f, (eye.y - up) / -d.y) : 0.0f;
+        float t1 = d.y < 0.0f ? (eye.y + down) / -d.y : d.y > 0.0f ? (up - eye.y) / d.y : tEdge;
+        if (t0 >= tEdge)
+            return seaR;
+        bool toEdge = t1 >= tEdge;
+        t1 = std::min(t1, tEdge);
+        if (above(d, t0) <= 0.0f)
+            return t0 * horiz;
+        const int kSteps = 32;
+        float prev = t0;
+        for (int k = 1; k <= kSteps; ++k)
+        {
+            float t = t0 + (t1 - t0) * float(k) / float(kSteps);
+            if (above(d, t) <= 0.0f)
+            {
+                for (int b = 0; b < 5; ++b) // bisect the crossing
+                {
+                    float m = 0.5f * (prev + t);
+                    if (above(d, m) > 0.0f)
+                        prev = m;
+                    else
+                        t = m;
+                }
+                return t * horiz;
+            }
+            prev = t;
+        }
+        return toEdge ? seaR : (d.y < 0.0f ? t1 * horiz : -1.0f);
+    };
+
+    const float aspect = float(ctx.width) / float(ctx.height);
+    const float ty = std::tan(0.5f * camera.ZoomedFovY()), tx = ty * aspect;
+    XMVECTOR f = camera.Forward();
+    XMVECTOR r = XMVector3Normalize(XMVector3Cross(XMVectorSet(0, 1, 0, 0), f));
+    XMVECTOR u = XMVector3Cross(f, r);
+    XMVECTOR bottom = XMVectorSubtract(f, XMVectorScale(u, ty));
+    if (XMVectorGetY(bottom) >= 0.0f)
+    {
+        zoomExcessNear = zoomExcessFar = 0.0f;
+        return ocean.PlainZoomGrid(); // the whole view is sky
+    }
+
+    // Where the frustum's edges meet the mean sea plane - the bottom-centre
+    // ray nearest, the top corners farthest. This part follows the camera
+    // exactly as it zooms and tilts.
+    auto planeDistance = [&](XMVECTOR dir)
+    {
+        XMFLOAT3 d;
+        XMStoreFloat3(&d, dir);
+        if (d.y >= 0.0f)
+            return seaR;
+        return std::min(eye.y * std::sqrt(d.x * d.x + d.z * d.z) / -d.y, seaR);
+    };
+    float planeNear = planeDistance(bottom);
+    float planeFar = planeDistance(XMVectorAdd(XMVectorAdd(f, XMVectorScale(r, tx)), XMVectorScale(u, ty)));
+
+    // How much nearer and farther the actual surface reaches, in log distance.
+    float nearHit = seaR, farHit = 0.0f;
+    const int kColumns = 5;
+    for (int c = 0; c < kColumns; ++c)
+    {
+        XMVECTOR column = XMVectorAdd(f, XMVectorScale(r, tx * (2.0f * c / (kColumns - 1) - 1.0f)));
+        float lo = hitDistance(XMVectorSubtract(column, XMVectorScale(u, ty)));
+        float hi = hitDistance(XMVectorAdd(column, XMVectorScale(u, ty)));
+        if (lo >= 0.0f)
+            nearHit = std::min(nearHit, lo);
+        farHit = std::max(farHit, hi < 0.0f ? seaR : hi);
+    }
+    // Waves keep passing under the edges, so the excess rises at once but
+    // decays over a couple of seconds: the window, and the lattices laid over
+    // it, hold still instead of breathing with every crest.
+    float decay = 1.0f - std::exp(-dt / 2.0f);
+    auto settle = [decay](float& s, float e) { s = std::max(e, s + (e - s) * decay); };
+    settle(zoomExcessNear, std::log(planeNear / std::max(nearHit, 1e-3f)));
+    settle(zoomExcessFar, std::log(std::max(farHit, 1e-3f) / planeFar));
+    // Plus a margin for what the CPU heights leave out: the finest cascade, the
+    // GPU's distance-filtered displacement, the surface between the columns.
+    const float kMargin = 0.1f;
+    float rhoNear = planeNear * std::exp(-std::max(zoomExcessNear, 0.0f) - kMargin);
+    float rhoFar = std::min(planeFar * std::exp(std::max(zoomExcessFar, 0.0f) + kMargin), seaR);
+
+    // Azimuth span: the frustum's widest corner ray, plus room for the surface
+    // shifting sideways into view at the near edge.
+    float sp = std::sin(camera.pitch), cp = std::cos(camera.pitch);
+    float reach = cp - ty * std::abs(sp); // forward reach of the most tilted corner ray
+    float halfAz = XM_PI;
+    if (reach > 0.02f)
+        halfAz = std::min(XM_PI, 1.15f * std::atan2(tx, reach)
+                                     + std::asin(std::min(1.0f, side / std::max(rhoNear, 1e-3f))));
+    return ocean.FitZoomGrid(camera.yaw, halfAz, rhoNear, rhoFar, dt);
 }
 
 // Left-click the water to drop the meteorite exactly there. The incoming side
@@ -824,6 +1002,14 @@ D3D12_GPU_VIRTUAL_ADDRESS App::FillFrameCB()
     cb.gridScale = ocean.GridScale();
     meteor.FillImpacts(cb.impacts);
     whirlpool.FillCB(cb.whirl, cb.whirl2, cb.whirl3);
+    // Shaders that fade detail by distance (a stand-in for pixel footprint)
+    // scale that distance by 1/zoom: through the lens, a crest 1 km out
+    // covers the pixels it would at 1 km / zoom. The yaw and the rest are
+    // for the zoom grid the ocean mesh is laid out on.
+    cb.zoom = XMFLOAT4(camera.zoom, 1.0f / camera.zoom, std::sin(camera.yaw), std::cos(camera.yaw));
+    cb.zoomFan = zoomGrid.fan;
+    cb.zoomRings = zoomGrid.rings;
+    cb.zoomSkirt = zoomGrid.skirt;
 
     void* p = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS va = ctx.AllocUpload(sizeof(FrameCB), &p);
@@ -918,6 +1104,7 @@ void App::RenderFrame(float dt)
     prevMeteorFlying = flyingNow;
     meteor.UploadParticles(ctx);
     buoy.Update(ctx, ocean, &meteor, &whirlpool, dt * uiTimeScale, simTime, oceanParams.choppiness);
+    zoomGrid = FitZoomGrid(dt); // reads the same readback slot as the buoy
 
     sky.RecordGenerate(ctx, skyParams);
     ocean.RecordSimulation(ctx, simTime, dt * uiTimeScale, oceanParams, spectrumDirty);
@@ -946,8 +1133,9 @@ void App::RenderFrame(float dt)
     buoy.DrawGlow(ctx, frameCB, camera.pos);
     meteor.DrawTrail(ctx, frameCB);
 
+    // Dithered output only while zoomed in: magnified sky gradients band.
     post.Record(ctx, RtvSlot::Backbuffer0 + bbIdx, uiFxaa,
-        exposureBase * uiExposureMul, uiBloom, 1.15f, 0.32f);
+        exposureBase * uiExposureMul, uiBloom, 1.15f, 0.32f, camera.zoom > 1.0f ? 1.0f : 0.0f);
 
     // --- UI directly on the backbuffer ---
     D3D12_CPU_DESCRIPTOR_HANDLE bbRtv = ctx.RtvCpu(RtvSlot::Backbuffer0 + bbIdx);
@@ -1018,6 +1206,7 @@ void App::BuildUi(float dt)
     ImGui::Text("%.1f FPS  (%.2f ms)", fpsDisplay, fpsDisplay > 0 ? 1000.0f / fpsDisplay : 0.0f);
     // One tab after "ms)", then the buttons on the same line.
     ImGui::SameLine(0.0f, ImGui::CalcTextSize("    ").x);
+    const float buttonColumnX = ImGui::GetCursorPosX(); // the row below lines up here
     bool collapseAll = false;
     if (ImGui::Button("Collapse_ALL"))
         collapseAll = true;
@@ -1036,7 +1225,14 @@ void App::BuildUi(float dt)
     if (enlargePushed)
         ImGui::PopStyleColor(3);
 
-    // Next row, under the FPS readout. Stay held down while the window covers the monitor.
+    // Next row: the zoom readout under the FPS, its buttons in the column of
+    // the ones above, so they hold still while the readout changes width.
+    const float zoom = camera.zoom;
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text(zoom < 9.995f ? "Zoom %.2fx" : zoom < 99.95f ? "Zoom %.1fx" : "Zoom %.0fx", zoom);
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), buttonColumnX));
+    // Stay held down while the window covers the monitor.
     const bool fullscreenPushed = fullscreen;
     if (fullscreenPushed)
     {
@@ -1287,6 +1483,7 @@ void App::BuildUi(float dt)
     ImGui::PushStyleColor(ImGuiCol_Text, hintCol);
     ImGui::TextUnformatted("RMB drag: look around  |  WASD/QE: move  |  F11: fullscreen");
     ImGui::TextUnformatted("LMB: water event  |  Shift: fast  |  Wheel: speed  |  Esc: quit");
+    ImGui::TextUnformatted("RMB + Wheel: zoom in / out");
     ImGui::PopStyleColor();
     if (hint)
         ImGui::PopFont();
@@ -1351,17 +1548,28 @@ LRESULT App::HandleMsg(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (mouseLook)
         {
             POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            camera.AddLook((p.x - lastMouse.x) * 0.0032f, (p.y - lastMouse.y) * 0.0032f);
+            // Scaled by the zoom so a mouse pixel pans the view by the same
+            // screen distance at 100x as at 1x.
+            float look = 0.0032f / camera.zoom;
+            camera.AddLook((p.x - lastMouse.x) * look, (p.y - lastMouse.y) * look);
             lastMouse = p;
         }
         return 0;
     case WM_MOUSEWHEEL:
-        if (!io || !io->WantCaptureMouse)
+    {
+        float steps = GET_WHEEL_DELTA_WPARAM(wp) / float(WHEEL_DELTA);
+        if (mouseLook && (GET_KEYSTATE_WPARAM(wp) & MK_RBUTTON))
         {
-            float steps = GET_WHEEL_DELTA_WPARAM(wp) / float(WHEEL_DELTA);
+            // Right button held on the scene: the wheel is the zoom ring.
+            // Forward zooms in, back zooms out.
+            zoomSteps = std::clamp(zoomSteps + steps, kZoomStepsMin, kZoomStepsMax);
+        }
+        else if (!io || !io->WantCaptureMouse)
+        {
             camera.moveSpeed = std::clamp(camera.moveSpeed * std::pow(1.25f, steps), 0.5f, 500.0f);
         }
         return 0;
+    }
     case WM_SYSKEYDOWN:
         // Alt+Enter. Bit 29 is the context code (Alt held); bit 30 is the previous state.
         if (wp == VK_RETURN && (lp & (1 << 29)) && (lp & (1 << 30)) == 0)
