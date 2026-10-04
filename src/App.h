@@ -38,6 +38,7 @@ struct LaunchOptions
     float camX = 0, camY = 12, camZ = 0;
     float yawDeg = 0, pitchDeg = -1.0f;
     float zoom = 1.0f;     // --zoom: start at this optical zoom
+    float resetViewAt = -1; // press ReSet_VIEW at this sim time (test hook)
 };
 
 class App
@@ -87,6 +88,7 @@ private:
     void UpdateLighting();
     void UpdateCameraInput(float dt);
     void UpdateZoom(float dt);   // eases the lens toward the RMB + wheel target
+    void ResetView();            // camera back to the start: position, direction, zoom
     void LaunchMeteor(); // fires the rock + its descent sound
     void LaunchMeteorAt(int mouseX, int mouseY); // click-to-place impact from the sky
     void SpawnWhirlpool();                       // vortex a fixed way ahead of the camera
@@ -142,6 +144,7 @@ private:
     int uiWhirlPreset = kWhirlDefaultPreset; // strength preset driving uiWhirl
     bool spectrumDirty = true;
     bool meteorAutoLaunched = false;
+    bool viewAutoReset = false;
     int whirlAutoSpawned = 0;
     bool prevMeteorFlying = false; // edge-detects the water impact for its sound
 

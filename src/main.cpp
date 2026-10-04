@@ -69,6 +69,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         else if (a == L"--yaw") { opts.hasCamera = true; opts.yawDeg = std::wcstof(next().c_str(), nullptr); }
         else if (a == L"--pitch") { opts.hasCamera = true; opts.pitchDeg = std::wcstof(next().c_str(), nullptr); }
         else if (a == L"--zoom") opts.zoom = std::wcstof(next().c_str(), nullptr);
+        else if (a == L"--resetview") opts.resetViewAt = std::wcstof(next().c_str(), nullptr); // test hook
         else if (a == L"--fixeddt") opts.fixedDt = std::wcstof(next().c_str(), nullptr);
         else if (a == L"--meteor") opts.meteorAt = std::wcstof(next().c_str(), nullptr);
         else if (a == L"--clickmeteor") // test hook: place the auto-meteor at a screen pixel

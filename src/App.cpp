@@ -375,6 +375,11 @@ int App::Run(HINSTANCE hInst, const LaunchOptions& options)
                 LaunchMeteor();
             meteorAutoLaunched = true;
         }
+        if (opts.resetViewAt >= 0.0f && simTime >= opts.resetViewAt && !viewAutoReset)
+        {
+            ResetView();
+            viewAutoReset = true;
+        }
         if (opts.whirlAt >= 0.0f && whirlAutoSpawned < opts.whirlCount
             && simTime >= opts.whirlAt + whirlAutoSpawned * opts.whirlGap)
         {
@@ -526,20 +531,7 @@ void App::InitSystems()
     ImGui_ImplDX12_Init(ctx.Dev(), GpuContext::kFramesInFlight, GpuContext::kBackbufferFormat,
         ctx.srvHeap.Get(), ctx.SrvCpu(DescSlot::ImGuiFont), ctx.SrvGpu(DescSlot::ImGuiFont));
 
-    camera.pos = XMFLOAT3(0.0f, 12.0f, 0.0f);
-    camera.yaw = 0.0f;
-    camera.pitch = -0.02f;
-    if (opts.hasCamera)
-    {
-        camera.pos = XMFLOAT3(opts.camX, opts.camY, opts.camZ);
-        camera.yaw = XMConvertToRadians(opts.yawDeg);
-        camera.pitch = XMConvertToRadians(opts.pitchDeg);
-    }
-    if (opts.zoom != 1.0f)
-    {
-        camera.zoom = std::clamp(opts.zoom, kZoomMin, kZoomMax);
-        zoomSteps = std::clamp(kZoomStepsPerDoubling * std::log2(camera.zoom), kZoomStepsMin, kZoomStepsMax);
-    }
+    ResetView();
     buoy.anchor = XMFLOAT2(0.0f, 95.0f);
 
     ApplyLod(uiLod, true);
@@ -674,6 +666,28 @@ void App::UpdateCameraInput(float dt)
     float boost = key(VK_SHIFT) ? 4.0f : 1.0f;
     if (fwd != 0 || right != 0 || up != 0)
         camera.Move(fwd * boost, right * boost, up * boost, dt);
+}
+
+// The view the app opens with (ReSet_VIEW returns to it): the default spot
+// and lens, or the --campos / --yaw / --pitch / --zoom it was started with.
+void App::ResetView()
+{
+    camera.pos = XMFLOAT3(0.0f, 12.0f, 0.0f);
+    camera.yaw = 0.0f;
+    camera.pitch = -0.02f;
+    if (opts.hasCamera)
+    {
+        camera.pos = XMFLOAT3(opts.camX, opts.camY, opts.camZ);
+        camera.yaw = XMConvertToRadians(opts.yawDeg);
+        camera.pitch = XMConvertToRadians(opts.pitchDeg);
+    }
+    camera.zoom = 1.0f;
+    zoomSteps = 0.0f;
+    if (opts.zoom != 1.0f)
+    {
+        camera.zoom = std::clamp(opts.zoom, kZoomMin, kZoomMax);
+        zoomSteps = std::clamp(kZoomStepsPerDoubling * std::log2(camera.zoom), kZoomStepsMin, kZoomStepsMax);
+    }
 }
 
 // The lens glides to each new wheel stop instead of jumping. It eases in log
@@ -1225,13 +1239,19 @@ void App::BuildUi(float dt)
     if (enlargePushed)
         ImGui::PopStyleColor(3);
 
-    // Next row: the zoom readout under the FPS, its buttons in the column of
-    // the ones above, so they hold still while the readout changes width.
+    // Next row: the zoom readout under the FPS, with its 35 mm-camera
+    // equivalent, then the buttons in the column of the ones above, so they
+    // hold still while the readout changes width.
     const float zoom = camera.zoom;
+    const float focal = camera.FocalLength35(float(ctx.width) / float(ctx.height));
     ImGui::AlignTextToFramePadding();
-    ImGui::Text(zoom < 9.995f ? "Zoom %.2fx" : zoom < 99.95f ? "Zoom %.1fx" : "Zoom %.0fx", zoom);
+    ImGui::Text(zoom < 9.995f ? "Zoom %.2fx (%.0f mm)" : zoom < 99.95f ? "Zoom %.1fx (%.0f mm)" : "Zoom %.0fx (%.0f mm)",
+                zoom, focal);
     ImGui::SameLine();
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), buttonColumnX));
+    if (ImGui::Button("ReSet_VIEW"))
+        ResetView();
+    ImGui::SameLine();
     // Stay held down while the window covers the monitor.
     const bool fullscreenPushed = fullscreen;
     if (fullscreenPushed)

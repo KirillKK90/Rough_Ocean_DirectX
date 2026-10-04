@@ -123,7 +123,10 @@ Studio and build/run from there.
 
 - **Right mouse drag** — look around
 - **Right mouse button + mouse wheel** — optical zoom from 0.5x to 100x: wheel
-  forward zooms in, back zooms out. The level shows under the FPS readout
+  forward zooms in, back zooms out. The level shows under the FPS readout with
+  its 35 mm-camera equivalent focal length (1x = 18 mm on a 16:9 window);
+  **ReSet_VIEW** next to it returns the camera to its starting position,
+  direction and zoom
 - **Left mouse click on the water** — drop a meteorite exactly there. Click the
   left half of the view and it streaks in from the right of the sky; click the
   right half and it comes from the left

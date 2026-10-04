@@ -41,6 +41,15 @@ public:
         return zoom == 1.0f ? fovY : 2.0f * std::atan(std::tan(0.5f * fovY) / zoom);
     }
 
+    // The "35 mm equivalent": the focal length a full-frame camera (36 x 24 mm,
+    // 43.27 mm diagonal) needs for the same diagonal angle of view.
+    float FocalLength35(float aspect) const
+    {
+        const float kFrameDiagonal = 43.267f; // mm
+        float tanV = std::tan(0.5f * ZoomedFovY());
+        return 0.5f * kFrameDiagonal / (tanV * std::sqrt(1.0f + aspect * aspect));
+    }
+
     // Reversed-Z projection (near/far swapped) for good depth precision at
     // horizon distances.
     DirectX::XMMATRIX Proj(float aspect) const
